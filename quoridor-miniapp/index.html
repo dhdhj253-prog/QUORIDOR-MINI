@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Quoridor</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <div id="app" class="app-container">
+    <!-- Side Drawer: Pure Player Profile -->
+    <div class="drawer-backdrop hidden" id="drawer-backdrop"></div>
+    <aside class="side-drawer hidden" id="side-drawer">
+      <div class="drawer-profile-header">
+        <div class="drawer-avatar-circle" id="drawer-avatar">👤</div>
+        <div class="drawer-user-details">
+          <div class="drawer-name-row">
+            <span class="drawer-username" id="drawer-name">Player</span>
+            <span class="elo-pill" id="drawer-elo-badge">1000</span>
+          </div>
+          <span class="drawer-role-tag" id="drawer-role-tag">Player</span>
+        </div>
+      </div>
+
+      <!-- Profile Stats & Overview -->
+      <div class="drawer-profile-content">
+        <div class="drawer-tier-badge-row">
+          <span class="drawer-tier-label" id="drawer-tier-name">Yellow Tier (1000 - 1199)</span>
+        </div>
+
+        <div class="drawer-stats-grid">
+          <div class="drawer-stat-card">
+            <span class="drawer-stat-val" id="drawer-stat-rating">1000</span>
+            <span class="drawer-stat-lbl">CURRENT ELO</span>
+          </div>
+          <div class="drawer-stat-card">
+            <span class="drawer-stat-val" id="drawer-stat-peak">1000</span>
+            <span class="drawer-stat-lbl">PEAK ELO</span>
+          </div>
+          <div class="drawer-stat-card">
+            <span class="drawer-stat-val" id="drawer-stat-wins">0</span>
+            <span class="drawer-stat-lbl">WINS</span>
+          </div>
+          <div class="drawer-stat-card">
+            <span class="drawer-stat-val" id="drawer-stat-streak">0 🔥</span>
+            <span class="drawer-stat-lbl">WIN STREAK</span>
+          </div>
+        </div>
+
+        <button class="drawer-btn-side-switch" id="btn-drawer-switch-side">
+          🔄 Setup New Match
+        </button>
+      </div>
+
+      <div class="drawer-footer-brand">
+        <div class="drawer-brand-icon">♟️</div>
+        <span class="drawer-brand-text">Quoridor</span>
+      </div>
+    </aside>
+
+    <!-- Top Nav Header -->
+    <header class="top-nav">
+      <div class="nav-back-title">
+        <button class="nav-icon-btn" id="btn-drawer-open">☰</button>
+        <div class="nav-title-group" style="flex-direction: row; align-items: center; gap: 8px;">
+          <span class="nav-app-name">Quoridor</span>
+          <span class="nav-match-badge rated" id="nav-match-badge">Rated</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Player 2 (Top / Opponent) -->
+    <div class="player-bar" id="p2-bar">
+      <div class="player-left">
+        <div class="player-avatar-circle" id="p2-avatar">
+          <div class="avatar-silhouette">👤</div>
+        </div>
+        <div class="player-info">
+          <span class="player-name-text" id="p2-name">Waiting for opponent…</span>
+          <div class="player-meta-row">
+            <span class="elo-pill" id="p2-elo-badge">1000</span>
+            <span class="player-turn-tag" id="p2-turn-tag"></span>
+          </div>
+        </div>
+      </div>
+      <div class="player-walls-counter">
+        <span class="walls-badge-label">Walls (<span id="p2-walls-count">8</span>)</span>
+        <div class="wall-dots-row" id="p2-wall-dots"></div>
+      </div>
+    </div>
+
+    <!-- Opponent Disconnected Notice (Display Only after 60s) -->
+    <div id="opponent-disconnected-banner" class="opponent-disconnected-banner hidden">
+      ⚠️ Opponent disconnected
+    </div>
+
+    <!-- The 8x8 Quoridor Board Arena -->
+    <div class="board-wrapper">
+      <div class="board-outer">
+        <!-- Vertical coordinates 1-8 -->
+        <div class="board-coords-y">
+          <span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span>
+        </div>
+        <!-- Quoridor Grid -->
+        <div class="quoridor-grid-8x8" id="quoridor-grid"></div>
+        <!-- Horizontal coordinates a-h -->
+        <div class="board-coords-x">
+          <span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Player 1 (Bottom / You) -->
+    <div class="player-bar active-turn" id="p1-bar">
+      <div class="player-left">
+        <div class="player-avatar-circle" id="p1-avatar">👤</div>
+        <div class="player-info">
+          <span class="player-name-text" id="p1-name">Player</span>
+          <div class="player-meta-row">
+            <span class="elo-pill" id="p1-elo-badge">1000</span>
+            <span class="player-turn-tag" id="p1-turn-tag">Playing</span>
+          </div>
+        </div>
+      </div>
+      <div class="player-walls-counter">
+        <span class="walls-badge-label">Walls (<span id="p1-walls-count">8</span>)</span>
+        <div class="wall-dots-row" id="p1-wall-dots"></div>
+      </div>
+    </div>
+
+    <!-- Spectator Mode Banner (No spectator numbers) -->
+    <div class="spectator-banner hidden" id="spectator-banner">
+      <span>👁 Spectator Mode · Live Duel</span>
+    </div>
+
+    <!-- Controls & Action Buttons -->
+    <div class="bottom-controls-bar">
+      <div class="action-toggles" id="action-toggles">
+        <button class="control-btn active" id="btn-mode-move">
+          <span>🚶</span> Move
+        </button>
+        <button class="control-btn" id="btn-mode-wall">
+          <span>🧱</span> Wall (<span id="p1-wall-btn-count">8</span>)
+        </button>
+      </div>
+
+      <!-- Spectator status bar replacing controls -->
+      <div class="spectator-bar hidden" id="spectator-bar">
+        <span>👁 You are spectating this match in read-only mode</span>
+      </div>
+
+      <!-- GameFactory Bottom Bar Tabs matching reference screenshots -->
+      <div class="gamefactory-tab-bar">
+        <button class="tab-btn" id="tab-btn-menu">
+          <span class="tab-icon">☰</span>
+          <span class="tab-label">Menu</span>
+        </button>
+        <button class="tab-btn" id="btn-resign">
+          <span class="tab-icon">🏳</span>
+          <span class="tab-label">Resign</span>
+        </button>
+        <button class="tab-btn" id="btn-draw">
+          <span class="tab-icon">🤝</span>
+          <span class="tab-label">Draw</span>
+        </button>
+        <button class="tab-btn" id="btn-cancel-game">
+          <span class="tab-icon">✖</span>
+          <span class="tab-label">Cancel</span>
+        </button>
+        <button class="tab-btn" id="tab-btn-chat">
+          <span class="tab-icon">💬</span>
+          <span class="tab-label">Chat</span>
+          <span class="chat-badge hidden" id="chat-unread-dot">•</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Game Setup Modal (Screenshot 1) - hidden by default to prevent spectator flash -->
+    <div class="game-modal hidden" id="side-select-modal">
+      <div class="modal-content-box gamefactory-setup-box">
+        <p class="setup-instruction-text">
+          Please, set up game settings and choose a side to play with.
+        </p>
+
+        <!-- Player Profile Row (Name & Avatar) -->
+        <div class="setup-player-card">
+          <div class="setup-avatar-preview" id="setup-avatar-preview">👤</div>
+          <div class="setup-name-col">
+            <span class="setup-input-label">Your Name</span>
+            <input type="text" class="setup-name-input" id="setup-name-input" placeholder="Player Name or @username" maxlength="25" />
+          </div>
+        </div>
+
+        <!-- Rating Toggle Switch -->
+        <div class="setup-rating-row">
+          <label class="rating-switch">
+            <input type="checkbox" id="setup-rating-toggle" checked />
+            <span class="rating-slider round"></span>
+          </label>
+          <span class="rating-text-label" id="rating-status-label">Rating: <b>Rated (ELO Active)</b></span>
+        </div>
+
+        <!-- Yellow side buttons: Top (Plays First) / Bottom (Plays Second) -->
+        <div class="setup-side-buttons-row">
+          <button class="setup-side-btn" id="btn-choose-top">
+            Top (Plays 1st)
+          </button>
+          <button class="setup-side-btn" id="btn-choose-bottom">
+            Bottom (Plays 2nd)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Waiting for Opponent Modal (Screenshot 2) -->
+    <div class="game-modal hidden" id="waiting-modal">
+      <div class="modal-content-box gamefactory-waiting-box">
+        <h4 class="waiting-title">Game contract settings:</h4>
+        
+        <div class="waiting-contract-list">
+          <div class="waiting-contract-item">• Your side: <b id="waiting-side-text">Top (Plays 1st)</b></div>
+          <div class="waiting-contract-item">• Rating: <b id="waiting-rating-text">Yes</b></div>
+        </div>
+
+        <div class="waiting-status-section">
+          <div class="waiting-pulse-dot"></div>
+          <p class="waiting-main-text">Waiting for your opponent to join the game…</p>
+        </div>
+
+        <button class="modal-btn-secondary" id="btn-cancel-waiting">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Sliding Chat Panel (Screenshot 2) -->
+    <div class="sliding-panel hidden" id="chat-panel">
+      <div class="panel-header">
+        <span class="panel-title">Chat</span>
+        <button class="panel-close-btn" id="btn-chat-close">✕</button>
+      </div>
+      <div class="chat-messages-container" id="chat-messages-list">
+        <div class="chat-msg system">
+          <span>👋 Welcome to Quoridor Arena live chat! Players can discuss moves here.</span>
+        </div>
+      </div>
+      <form class="chat-input-bar" id="chat-form">
+        <input type="text" class="chat-input" id="chat-input-field" placeholder="Send a message…" maxlength="120" />
+        <button type="submit" class="chat-send-btn" id="btn-chat-send">➤</button>
+      </form>
+    </div>
+
+    <!-- Sliding Notation (Move History) Panel -->
+    <div class="sliding-panel hidden" id="notation-panel">
+      <div class="panel-header">
+        <span class="panel-title">Move Notation</span>
+        <button class="panel-close-btn" id="btn-notation-close">✕</button>
+      </div>
+      <div class="notation-list-container" id="notation-list">
+        <div class="notation-empty">No moves recorded yet.</div>
+      </div>
+    </div>
+
+    <!-- Victory Modal -->
+    <div class="game-modal hidden" id="gameover-modal">
+      <div class="modal-content-box">
+        <div style="font-size: 2.8rem;" id="modal-icon">🏆</div>
+        <h2 class="modal-title-bold" id="modal-title">Victory</h2>
+        <p class="modal-subtitle-text" id="modal-desc">Reached the opponent baseline!</p>
+        
+        <div class="modal-rating-pill-row">
+          <span class="elo-pill" id="modal-elo-pill">1016</span>
+          <span id="modal-delta-text" style="font-weight: 700; color: #10b981;">+16 ELO</span>
+        </div>
+
+        <button class="modal-btn-full" id="btn-modal-rematch">Play Again</button>
+        <button class="modal-btn-secondary" id="btn-modal-share">Share Result</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

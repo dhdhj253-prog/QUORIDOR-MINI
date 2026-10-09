@@ -1,0 +1,2 @@
+import { spawn } from 'node:child_process';
+export function encodeFrames(frameGlob:string,out:string){return new Promise<void>((resolve,reject)=>{const p=spawn('ffmpeg',['-y','-framerate','1.25','-i',frameGlob,'-vf','scale=720:720:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2','-c:v','libx264','-pix_fmt','yuv420p',out],{stdio:'ignore'});p.on('error',reject);p.on('exit',c=>c===0?resolve():reject(new Error(`ffmpeg exited ${c}`)))})}

@@ -1,0 +1,12 @@
+{
+  "name": "quoridor-telegram-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:miniapp": "npm --prefix quoridor-miniapp install && npm --prefix quoridor-miniapp run build",
+    "build:bot": "npm --prefix quoridor-bot install && npm --prefix quoridor-bot run build",
+    "build": "npm run build:miniapp && npm run build:bot",
+    "start": "node quoridor-bot/dist/index.js"
+  }
+}
