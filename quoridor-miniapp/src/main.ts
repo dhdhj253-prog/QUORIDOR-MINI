@@ -1116,6 +1116,7 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
 
     // Always ensure the board and UI are up-to-date with current game state
     if (room.gameState) {
+      const prevTurn = gameState ? gameState.turn : null;
       gameState = normalizeGameState(room.gameState);
       if (room.moves && room.moves.length > moveHistory.length) {
         for (let i = moveHistory.length; i < room.moves.length; i++) {
@@ -1124,10 +1125,8 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
         }
         sounds.playMove();
       }
-      if (gameState.turn === myPlayerIndex && !isSpectator) {
-        inputMode = 'move';
-        btnModeMove.classList.add('active');
-        btnModeWall.classList.remove('active');
+      if (prevTurn !== myPlayerIndex && gameState.turn === myPlayerIndex && !isSpectator) {
+        setInputMode('move');
       }
       requestAnimationFrame(() => {
         updateUI();
@@ -1438,6 +1437,7 @@ async function onCellClick(cell: number) {
         broadcastMove(move, myPlayerIndex);
         sounds.playMove();
         triggerHaptic('light');
+        setInputMode('move');
       } else {
         sounds.playError();
         triggerHaptic('error');
@@ -1448,6 +1448,7 @@ async function onCellClick(cell: number) {
         broadcastMove(move, myPlayerIndex);
         sounds.playWall();
         triggerHaptic('medium');
+        setInputMode('move');
       } else {
         sounds.playError();
         triggerHaptic('error');
@@ -1467,6 +1468,7 @@ async function onCellClick(cell: number) {
       recordNotation(move, who);
       sounds.playMove();
       triggerHaptic('light');
+      setInputMode('move');
 
       if (gameState.over >= 0) {
         onServerGameOver(gameState.over as Player);
@@ -1484,6 +1486,7 @@ async function onCellClick(cell: number) {
       recordNotation(move, who);
       sounds.playWall();
       triggerHaptic('medium');
+      setInputMode('move');
 
       if (gameState.over >= 0) {
         onServerGameOver(gameState.over as Player);

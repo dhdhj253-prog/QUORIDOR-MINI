@@ -942,11 +942,22 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
                 state.turn = 1 - expectedTurn;
               }
             } else if (move.type === 'wall') {
-              if (state.walls[expectedTurn] > 0) {
-                state.blocked[move.cell] = 1;
-                state.walls[expectedTurn] = Math.max(0, state.walls[expectedTurn] - 1);
-                state.turn = 1 - expectedTurn;
+              if (
+                typeof move.cell !== 'number' ||
+                move.cell < 0 ||
+                move.cell >= 64 ||
+                state.blocked[move.cell] ||
+                move.cell === state.pos[0] ||
+                move.cell === state.pos[1] ||
+                state.walls[expectedTurn] <= 0
+              ) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'INVALID_WALL', message: 'Cannot place wall: cell is blocked, occupied by a pawn, or no walls remaining.' }));
+                return;
               }
+              state.blocked[move.cell] = 1;
+              state.walls[expectedTurn] = Math.max(0, state.walls[expectedTurn] - 1);
+              state.turn = 1 - expectedTurn;
             }
             state.ply = (state.ply || 0) + 1;
             if (body.record) {
