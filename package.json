@@ -1,12 +1,17 @@
 {
-  "name": "quoridor-telegram-app",
+  "name": "quoridor-miniapp",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build:miniapp": "npm --prefix quoridor-miniapp install && npm --prefix quoridor-miniapp run build",
-    "build:bot": "npm --prefix quoridor-bot install && npm --prefix quoridor-bot run build",
-    "build": "npm run build:miniapp && npm run build:bot",
-    "start": "node quoridor-bot/dist/index.js"
+    "dev": "vite --host",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "quoridor-telegram-app": "file:.."
   }
 }
