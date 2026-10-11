@@ -160,6 +160,7 @@ type InputMode = 'move' | 'wall';
 type UserSide = 'bottom' | 'top'; // Player side preference
 
 let gameMode: GameMode = 'bot';
+let isVsBotGame = false;
 let inputMode: InputMode = 'move';
 let playerSide: UserSide | null = null;
 let myPlayerIndex: Player = 0; // 0 = Bottom (Rank 0), 1 = Top (Rank 7)
@@ -306,6 +307,55 @@ function showRematchDialog(state: RematchDialogState) {
 function hideRematchDialog() {
   currentRematchState = 'none';
   rematchDialog?.classList.add('hidden');
+}
+
+// Draw Flow Dialog & State
+const drawDialog = document.getElementById('draw-dialog');
+const drawDialogText = document.getElementById('draw-dialog-text');
+const drawBtnPrimary = document.getElementById('draw-btn-primary') as HTMLButtonElement | null;
+const drawBtnSecondary = document.getElementById('draw-btn-secondary') as HTMLButtonElement | null;
+
+let isDrawProposer = false;
+type DrawDialogState = 'none' | 'confirm_propose' | 'waiting_approval' | 'opponent_offered';
+let currentDrawState: DrawDialogState = 'none';
+
+function showDrawDialog(state: DrawDialogState) {
+  if (isSpectator) return;
+  currentDrawState = state;
+  if (!drawDialog || !drawDialogText || !drawBtnPrimary || !drawBtnSecondary) return;
+
+  if (state === 'confirm_propose') {
+    drawDialogText.textContent = 'Do you want to offer a draw to your opponent?';
+    drawBtnPrimary.textContent = 'Yes';
+    drawBtnPrimary.classList.remove('hidden');
+    drawBtnSecondary.textContent = 'No';
+    drawBtnSecondary.classList.remove('hidden');
+    drawDialog.classList.remove('hidden');
+    triggerHaptic('light');
+  } else if (state === 'waiting_approval') {
+    drawDialogText.textContent = 'The draw was offered to your opponent. Waiting for his approval...';
+    drawBtnPrimary.classList.add('hidden');
+    drawBtnSecondary.textContent = 'Cancel';
+    drawBtnSecondary.classList.remove('hidden');
+    drawDialog.classList.remove('hidden');
+    triggerHaptic('light');
+  } else if (state === 'opponent_offered') {
+    drawDialogText.textContent = 'Your opponent is offering you a draw.';
+    drawBtnPrimary.textContent = 'Accept';
+    drawBtnPrimary.classList.remove('hidden');
+    drawBtnSecondary.textContent = 'Reject';
+    drawBtnSecondary.classList.remove('hidden');
+    drawDialog.classList.remove('hidden');
+    sounds.playMove();
+    triggerHaptic('medium');
+  } else {
+    drawDialog.classList.add('hidden');
+  }
+}
+
+function hideDrawDialog() {
+  currentDrawState = 'none';
+  drawDialog?.classList.add('hidden');
 }
 
 let opponentPhotoUrl: string | undefined = undefined;
@@ -602,22 +652,8 @@ function init() {
   if (btnDraw) {
     btnDraw.addEventListener('click', () => {
       if (isSpectator || gameState.over !== -1) return;
-      if (gameMode === 'multiplayer') {
-        fetch('/api/room/action', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: currentGameId,
-            type: 'DRAW',
-            senderId: myClientId
-          })
-        }).catch(() => {});
-      } else {
-        gameState.over = 2;
-        onServerGameOver(2, undefined, undefined, undefined, 'draw');
-        updateUI();
-      }
-      triggerHaptic('light');
+      if (gameMode === 'bot' || isVsBotGame) return;
+      showDrawDialog('confirm_propose');
     });
   }
 
@@ -743,6 +779,84 @@ function init() {
             id: currentGameId,
             type: 'REMATCH_REJECT',
             senderId: myClientId
+          })
+        });
+      } catch {}
+    }
+  });
+
+  drawBtnPrimary?.addEventListener('click', async () => {
+    if (currentDrawState === 'confirm_propose') {
+      isDrawProposer = true;
+      showDrawDialog('waiting_approval');
+      try {
+        const res = await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'DRAW_OFFER',
+            senderId: myClientId,
+            initData: getRawInitData()
+          })
+        });
+        const data = await res.json();
+        if (data && data.error === 'DRAW_COOLDOWN') {
+          hideDrawDialog();
+          isDrawProposer = false;
+          showToast(data.message || 'Must play at least 3 moves before offering draw again');
+        }
+      } catch {}
+    } else if (currentDrawState === 'opponent_offered') {
+      hideDrawDialog();
+      try {
+        await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'DRAW_ACCEPT',
+            senderId: myClientId,
+            initData: getRawInitData()
+          })
+        });
+      } catch {}
+    }
+  });
+
+  drawBtnSecondary?.addEventListener('click', async () => {
+    if (currentDrawState === 'confirm_propose') {
+      hideDrawDialog();
+    } else if (currentDrawState === 'waiting_approval') {
+      hideDrawDialog();
+      const wasProposer = isDrawProposer;
+      isDrawProposer = false;
+      try {
+        await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'DRAW_CANCEL',
+            senderId: myClientId,
+            initData: getRawInitData()
+          })
+        });
+      } catch {}
+      if (wasProposer) {
+        showToast('Draw declined');
+      }
+    } else if (currentDrawState === 'opponent_offered') {
+      hideDrawDialog();
+      try {
+        await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'DRAW_REJECT',
+            senderId: myClientId,
+            initData: getRawInitData()
           })
         });
       } catch {}
@@ -1024,6 +1138,24 @@ function connectSSE() {
       p1EloDelta?.classList.add('hidden');
       p2EloDelta?.classList.add('hidden');
     });
+    es.addEventListener('DRAW_OFFER', () => {
+      try {
+        if (!isSpectator && !isDrawProposer) {
+          showDrawDialog('opponent_offered');
+        }
+      } catch {}
+    });
+    es.addEventListener('DRAW_DECLINED', () => {
+      hideDrawDialog();
+      if (isDrawProposer) {
+        showToast('Draw declined');
+        isDrawProposer = false;
+      }
+    });
+    es.addEventListener('DRAW_ACCEPTED', () => {
+      hideDrawDialog();
+      isDrawProposer = false;
+    });
     es.onerror = () => {
       try { es.close(); } catch {}
       activeEventSource = null;
@@ -1296,9 +1428,12 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
         btnCancelGame?.classList.remove('hidden');
       }
       if (room.vs_bot) {
+        isVsBotGame = true;
         tabBtnChat?.classList.add('hidden');
         chatPanel?.classList.add('hidden');
+        btnDraw?.classList.add('hidden');
       } else {
+        isVsBotGame = false;
         tabBtnChat?.classList.remove('hidden');
       }
     }
@@ -1365,6 +1500,34 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
             }
           }
         }
+      }
+
+      // Draw offer synchronization
+      if (room.gameState && room.gameState.over === -1 && !room.canceled) {
+        if (room.drawOfferedBy && !isSpectator) {
+          const myPlayerId = myPlayerIndex === 0 ? room.topPlayer?.id : room.bottomPlayer?.id;
+          const isMeProposer = room.drawOfferedBy === myClientId || (myPlayerId && room.drawOfferedBy === myPlayerId);
+          if (isMeProposer) {
+            if (currentDrawState !== 'waiting_approval') {
+              isDrawProposer = true;
+              showDrawDialog('waiting_approval');
+            }
+          } else {
+            if (currentDrawState !== 'opponent_offered') {
+              showDrawDialog('opponent_offered');
+            }
+          }
+        } else {
+          if (currentDrawState === 'waiting_approval' || currentDrawState === 'opponent_offered') {
+            hideDrawDialog();
+            if (isDrawProposer) {
+              showToast('Draw declined');
+              isDrawProposer = false;
+            }
+          }
+        }
+      } else {
+        hideDrawDialog();
       }
       console.log(`[CLIENT] Board re-rendered for turn: ${gameState.turn}`);
     } else {
@@ -1604,6 +1767,11 @@ function updateUI() {
       btnResign?.classList.add('hidden');
     } else {
       btnResign?.classList.remove('hidden');
+    }
+    if (isSpectator || gameMode === 'bot' || isVsBotGame) {
+      btnDraw?.classList.add('hidden');
+    } else {
+      btnDraw?.classList.remove('hidden');
     }
   }
 
@@ -1907,11 +2075,14 @@ function onServerGameOver(
   eloResult?: any,
   topPlayer?: any,
   bottomPlayer?: any,
-  endReason?: 'goal' | 'resigned' | 'draw' | 'canceled',
+  endReason?: 'goal' | 'resigned' | 'draw' | 'canceled' | 'repetition',
   _resignedBy?: string
 ) {
   if (hasProcessedGameOver) return;
   hasProcessedGameOver = true;
+
+  hideDrawDialog();
+  isDrawProposer = false;
 
   sounds.playWin();
   triggerHaptic('success');
@@ -1919,7 +2090,7 @@ function onServerGameOver(
   const isCanceled = winnerIndex === -2 || endReason === 'canceled' || (eloResult && eloResult.message === 'No result (canceled)');
   const winnerIsTop = winnerIndex === 0;
   const isWinner = !isCanceled && winnerIndex === myPlayerIndex;
-  const isDraw = winnerIndex === 2 || endReason === 'draw';
+  const isDraw = winnerIndex === 2 || endReason === 'draw' || endReason === 'repetition';
   const reason = endReason || (isCanceled ? 'canceled' : (isDraw ? 'draw' : 'goal'));
 
   let resultText = '';
@@ -1929,6 +2100,8 @@ function onServerGameOver(
     const botName = spectatorBottomPlayer?.name || bottomPlayer?.name || 'Bottom Player';
     if (isCanceled) {
       resultText = 'No result (canceled)';
+    } else if (endReason === 'repetition') {
+      resultText = 'Draw - repeated position';
     } else if (isDraw) {
       resultText = 'Draw';
     } else {
@@ -1942,6 +2115,8 @@ function onServerGameOver(
   } else {
     if (isCanceled) {
       resultText = 'No result (canceled)';
+    } else if (endReason === 'repetition') {
+      resultText = 'Draw - repeated position';
     } else if (isDraw) {
       resultText = 'Draw';
     } else if (isWinner) {

@@ -19,6 +19,7 @@ import {
 import { renderProfileCard } from '../render/profile.js';
 import { registerReplayHandlers, handleReplay, handleReview } from './replay-handlers.js';
 import { createBotRoom } from '../rooms.js';
+import { buildPlayUrl } from './inline.js';
 
 export function registerCommands(bot: Bot) {
   bot.command('start', async ctx => {
@@ -44,13 +45,9 @@ export function registerCommands(bot: Bot) {
     }
     if (rawPayload.startsWith('game_') || rawPayload.startsWith('game-') || rawPayload.startsWith('room_')) {
       const id = rawPayload.replace(/^(game|room)[_-]/, '');
-      const webAppUrl = process.env.WEBAPP_URL || '';
-      const kb = new InlineKeyboard();
-      if (webAppUrl.startsWith('https://')) {
-        kb.webApp('🎮 Enter 1v1 Quoridor Match', `${webAppUrl}?gameId=${id}`);
-      } else {
-        kb.url('🎮 Enter 1v1 Quoridor Match', `https://t.me/${process.env.PUBLIC_BOT_USERNAME || 'panel4wordseekbot'}/app?startapp=${id}`);
-      }
+      const botUser = (ctx.me?.username || process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
+      const playUrl = buildPlayUrl(id, botUser);
+      const kb = new InlineKeyboard().url('🎮 Enter 1v1 Quoridor Match', playUrl);
       await ctx.reply(`🏰 <b>Quoridor Match #${id}</b>\n\nTap below to enter the live match:`, {
         parse_mode: 'HTML',
         reply_markup: kb
@@ -59,13 +56,16 @@ export function registerCommands(bot: Bot) {
     }
 
     const name = ctx.from?.first_name || 'Player';
-    const webAppUrl = process.env.WEBAPP_URL || '';
-    const kb = new InlineKeyboard();
-    if (webAppUrl.startsWith('https://')) {
-      kb.webApp('🤖 Play with Bot (Mini App)', `${webAppUrl}?mode=bot`).row();
-      kb.webApp('✨ Launch Mini App Arena', webAppUrl).row();
-    }
-    kb.text('👤 My Profile', 'nav_profile')
+    const botUser = (ctx.me?.username || process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
+    const botRoomId = 'bot_' + Math.random().toString(36).substring(2, 8);
+    createBotRoom(botRoomId);
+    const botPlayUrl = buildPlayUrl(botRoomId, botUser);
+    const arenaUrl = buildPlayUrl(undefined, botUser);
+
+    const kb = new InlineKeyboard()
+      .url('🤖 Play vs Bot (Medium)', botPlayUrl).row()
+      .url('✨ Launch Mini App Arena', arenaUrl).row()
+      .text('👤 My Profile', 'nav_profile')
       .text('🏆 Leaderboard', 'nav_leaderboard');
 
     await ctx.reply(
@@ -81,24 +81,16 @@ export function registerCommands(bot: Bot) {
     );
   });
 
-  bot.command(['newgame', 'play', 'bot'], async ctx => {
+  bot.command(['newgame', 'bot'], async ctx => {
     if (ctx.from) {
       await upsertUser({ id: ctx.from.id, name: ctx.from.first_name, username: ctx.from.username, is_registered: true });
     }
-    const webAppUrl = process.env.WEBAPP_URL || '';
     const botRoomId = 'bot_' + Math.random().toString(36).substring(2, 8);
     createBotRoom(botRoomId);
-    const directBotUrl = `${webAppUrl}?gameId=${botRoomId}`;
+    const botUser = (ctx.me?.username || process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
+    const playUrl = buildPlayUrl(botRoomId, botUser);
 
-    const kb = new InlineKeyboard()
-      .switchInline('Play with a friend (1v1)', '')
-      .row();
-
-    if (webAppUrl.startsWith('https://')) {
-      kb.webApp('Play vs Bot (Medium)', directBotUrl);
-    } else {
-      kb.url('Play vs Bot (Medium)', directBotUrl);
-    }
+    const kb = new InlineKeyboard().url('Play vs Bot (Medium)', playUrl);
 
     await ctx.reply('⚔️ <b>Quoridor Game Lobby</b>\n\nChoose your game mode:', {
       parse_mode: 'HTML',
@@ -168,20 +160,12 @@ export function registerCommands(bot: Bot) {
   bot.callbackQuery('nav_newgame', async ctx => {
     if (!ctx.from) return;
     await ctx.answerCallbackQuery();
-    const webAppUrl = process.env.WEBAPP_URL || '';
     const botRoomId = 'bot_' + Math.random().toString(36).substring(2, 8);
     createBotRoom(botRoomId);
-    const directBotUrl = `${webAppUrl}?gameId=${botRoomId}`;
+    const botUser = (ctx.me?.username || process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
+    const playUrl = buildPlayUrl(botRoomId, botUser);
 
-    const kb = new InlineKeyboard()
-      .switchInline('Play with a friend (1v1)', '')
-      .row();
-
-    if (webAppUrl.startsWith('https://')) {
-      kb.webApp('Play vs Bot (Medium)', directBotUrl);
-    } else {
-      kb.url('Play vs Bot (Medium)', directBotUrl);
-    }
+    const kb = new InlineKeyboard().url('Play vs Bot (Medium)', playUrl);
 
     await ctx.reply('⚔️ <b>Quoridor Game Lobby</b>\n\nChoose your game mode:', {
       parse_mode: 'HTML',

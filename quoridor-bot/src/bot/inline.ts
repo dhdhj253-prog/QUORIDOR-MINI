@@ -25,18 +25,43 @@ import { THEME } from '../theme.js';
 import type { Player, Move, State } from '../types.js';
 import { getOrCreateRoom, broadcastToRoom } from '../rooms.js';
 
-export function buildPlayUrl(gameId: string, botUsername: string): string {
+export function buildPlayUrl(gameId?: string, botUsername?: string): string {
   const shortName = (process.env.MINIAPP_SHORT_NAME || '').trim();
-  if (shortName) {
-    return `https://t.me/${botUsername}/${shortName}?startapp=${gameId}`;
+  const botUser = (botUsername || process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot')
+    .replace(/^@/, '')
+    .trim();
+  const webAppEnv = (process.env.WEBAPP_URL || '').trim();
+
+  const param = gameId ? `?startapp=${encodeURIComponent(gameId)}` : '';
+
+  // 1. If Telegram Mini App short-name is configured, use the official deep link (verified working in inline button)
+  if (shortName && botUser) {
+    return `https://t.me/${botUser}/${shortName}${param}`;
   }
-  return `https://t.me/${botUsername}?startapp=${gameId}`;
+
+  // 2. If WEBAPP_URL is a t.me direct link, use it
+  if (webAppEnv.startsWith('https://t.me/')) {
+    const base = webAppEnv.split('?')[0].replace(/\/$/, '');
+    return gameId ? `${base}?startapp=${encodeURIComponent(gameId)}` : base;
+  }
+
+  // 3. Main bot startapp deep link
+  if (botUser) {
+    return `https://t.me/${botUser}${param}`;
+  }
+
+  // 4. Fallback to direct webApp URL if present
+  if (webAppEnv) {
+    return gameId ? `${webAppEnv}?gameId=${encodeURIComponent(gameId)}` : webAppEnv;
+  }
+
+  return '';
 }
 
 export function registerInline(bot: Bot) {
   bot.on('inline_query', async ctx => {
     const gameId = randomUUID().substring(0, 8);
-    const botUser = (process.env.BOT_USERNAME || ctx.me?.username || process.env.PUBLIC_BOT_USERNAME || 'panel4wordseekbot').replace(/^@/, '').trim();
+    const botUser = (process.env.BOT_USERNAME || ctx.me?.username || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
 
     // Note: The sender is NOT auto-joined per requirement B.
     // The first user to open the link becomes host.
@@ -111,14 +136,9 @@ export function registerInline(bot: Bot) {
 
     const hostName = room.topPlayer?.name || 'Player 1';
     const text = `🏰 <b>GAMEFACTORY QUORIDOR 1v1 BATTLE</b>\n\n⚔️ <b>Match Active:</b>\n🚀 <b>Top:</b> ${hostName}\n👾 <b>Bottom:</b> ${p2Name}\n\n🎮 Both players tap below to enter the live board:`;
-    const webAppUrl = process.env.WEBAPP_URL || '';
-    const directPlayUrl = `${webAppUrl}?gameId=${gameId}`;
-    const kb = new InlineKeyboard();
-    if (webAppUrl.startsWith('https://')) {
-      kb.webApp('🎮 Enter Match (In-Place)', directPlayUrl);
-    } else {
-      kb.url('🎮 Enter Match (In-Place)', directPlayUrl);
-    }
+    const botUser = (process.env.BOT_USERNAME || ctx.me?.username || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
+    const playUrl = buildPlayUrl(gameId, botUser);
+    const kb = new InlineKeyboard().url('🎮 Enter Match', playUrl);
 
     const inlineId = ctx.inlineMessageId || ctx.callbackQuery?.inline_message_id;
     if (inlineId) {

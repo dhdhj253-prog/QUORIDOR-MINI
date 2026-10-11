@@ -125,19 +125,43 @@ export function formatNotation(move: any): string {
   return '';
 }
 
+export function getRoomPositionKey(state: {
+  pos: [number, number];
+  blocked: number[] | Uint8Array;
+  walls: [number, number];
+  turn: number;
+}): string {
+  if (!state || !state.pos || !state.walls) return '';
+  const p0 = state.pos[0];
+  const p1 = state.pos[1];
+  const blockedList: number[] = [];
+  if (state.blocked) {
+    for (let i = 0; i < 64; i++) {
+      if (state.blocked[i]) {
+        blockedList.push(i);
+      }
+    }
+  }
+  const blockedKey = blockedList.join(',');
+  const wallsKey = `${state.walls[0]},${state.walls[1]}`;
+  const turnKey = state.turn;
+  return `${p0},${p1}|${blockedKey}|${wallsKey}|${turnKey}`;
+}
+
 export interface RoomState {
   id: string;
   version: number;
   rated: boolean;
   vs_bot?: boolean;
   canceled?: boolean;
-  endReason?: 'goal' | 'resigned' | 'draw' | 'canceled';
+  endReason?: 'goal' | 'resigned' | 'draw' | 'canceled' | 'repetition';
   resignedBy?: string;
   creatorSide?: 'top' | 'bottom';
   creator?: { id: string; name: string; username?: string; photoUrl?: string };
   topPlayer?: RoomPlayer;
   bottomPlayer?: RoomPlayer;
   gameState?: any;
+  positionCounts?: Record<string, number>;
   moves: any[];
   notation?: NotationRow[];
   chat: any[];
@@ -151,6 +175,7 @@ export interface RoomState {
     rated: boolean;
   };
   drawOfferedBy?: string | null;
+  drawRejectedMoveCount?: Record<string, number>;
   rematchOfferedBy?: string | null;
   presence?: RoomPresence;
 }
@@ -377,6 +402,7 @@ export function getOrCreateRoom(id: string): RoomState {
       version: 1,
       rated: !isBot,
       vs_bot: isBot,
+      positionCounts: {},
       moves: [],
       notation: [],
       chat: [],
@@ -437,6 +463,18 @@ export function scheduleBotTurn(roomId: string) {
       r.gameState.turn = (1 - botWho) as any;
     }
 
+    if (r.gameState.over === -1) {
+      const posKey = getRoomPositionKey(r.gameState);
+      if (!r.positionCounts) r.positionCounts = {};
+      const count = (r.positionCounts[posKey] || 0) + 1;
+      r.positionCounts[posKey] = count;
+
+      if (count >= 3) {
+        r.gameState.over = 2;
+        r.endReason = 'repetition';
+      }
+    }
+
     r.gameState.ply = (r.gameState.ply || 0) + 1;
     const notStr = formatNotation(move);
     r.moves.push({ who: botWho, move, notation: notStr });
@@ -453,12 +491,24 @@ export function scheduleBotTurn(roomId: string) {
 
     r.version++;
     if (r.gameState.over !== -1) {
-      await applyRoomEloRating(r, r.gameState.over === 0 ? 1 : 0);
+      r.drawOfferedBy = null;
+      if (r.gameState.over === 2 && r.endReason === 'repetition') {
+        await applyRoomEloRating(r, 0.5);
+      } else {
+        await applyRoomEloRating(r, r.gameState.over === 0 ? 1 : 0);
+      }
     }
     broadcastToRoom(roomId, 'ROOM_SYNC', r);
     broadcastToRoom(roomId, 'MOVE', { move, who: botWho, version: r.version });
     if (r.gameState.over !== -1) {
-      broadcastToRoom(roomId, 'GAME_OVER', { winner: r.gameState.over, endReason: r.endReason, eloResult: r.eloResult, version: r.version });
+      broadcastToRoom(roomId, 'GAME_OVER', {
+        winner: r.gameState.over,
+        draw: r.gameState.over === 2,
+        endReason: r.endReason,
+        resultText: r.endReason === 'repetition' ? 'Draw - repeated position' : undefined,
+        eloResult: r.eloResult,
+        version: r.version
+      });
     }
   }, delayMs);
 }
@@ -1039,6 +1089,9 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             over: -1,
             ply: 0
           };
+          room.positionCounts = {
+            [getRoomPositionKey(room.gameState)]: 1
+          };
         }
 
         room.version++;
@@ -1131,12 +1184,21 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
         }
         const resolvedSide = getPlayerSideInRoom(room, senderId, senderTgId);
 
-        // Spectator Protection: Only assigned players can move pawns, resign, or cancel!
-        if (body.type === 'MOVE' || body.type === 'RESIGN' || body.type === 'CANCEL') {
+        // Spectator Protection: Only assigned players can move pawns, resign, cancel, or offer/respond to draws!
+        if (
+          body.type === 'MOVE' ||
+          body.type === 'RESIGN' ||
+          body.type === 'CANCEL' ||
+          body.type === 'DRAW' ||
+          body.type === 'DRAW_OFFER' ||
+          body.type === 'DRAW_ACCEPT' ||
+          body.type === 'DRAW_REJECT' ||
+          body.type === 'DRAW_CANCEL'
+        ) {
           const isRealPlayer = resolvedSide !== null;
           if (!isRealPlayer) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'SPECTATOR_READONLY', message: 'Spectators are read-only and cannot move, resign, or cancel.' }));
+            res.end(JSON.stringify({ error: 'SPECTATOR_READONLY', message: 'Spectators are read-only and cannot move, resign, cancel, or offer/respond to draws.' }));
             return;
           }
           if (body.type === 'MOVE') {
@@ -1216,10 +1278,29 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             room.gameState = body.state;
           }
 
+          if (state.over === -1) {
+            const posKey = getRoomPositionKey(state);
+            if (!room.positionCounts) room.positionCounts = {};
+            const count = (room.positionCounts[posKey] || 0) + 1;
+            room.positionCounts[posKey] = count;
+
+            if (count >= 3) {
+              state.over = 2; // draw
+              room.endReason = 'repetition';
+            }
+          }
+
           if (state.over !== -1) {
-            room.endReason = 'goal';
-            if (!room.rating_applied) {
-              await applyRoomEloRating(room, state.over === 0 ? 1 : 0);
+            room.drawOfferedBy = null;
+            if (state.over === 2 && room.endReason === 'repetition') {
+              if (!room.rating_applied) {
+                await applyRoomEloRating(room, 0.5);
+              }
+            } else {
+              room.endReason = 'goal';
+              if (!room.rating_applied) {
+                await applyRoomEloRating(room, state.over === 0 ? 1 : 0);
+              }
             }
           }
 
@@ -1230,7 +1311,14 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           broadcastToRoom(id, 'ROOM_SYNC', room);
           broadcastToRoom(id, 'MOVE', { ...body, version: room.version });
           if (state.over !== -1) {
-            broadcastToRoom(id, 'GAME_OVER', { winner: state.over, endReason: room.endReason, eloResult: room.eloResult, version: room.version });
+            broadcastToRoom(id, 'GAME_OVER', {
+              winner: state.over,
+              draw: state.over === 2,
+              endReason: room.endReason,
+              resultText: room.endReason === 'repetition' ? 'Draw - repeated position' : undefined,
+              eloResult: room.eloResult,
+              version: room.version
+            });
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, room, version: room.version }));
@@ -1320,6 +1408,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           }
           room.endReason = 'resigned';
           room.resignedBy = senderId;
+          room.drawOfferedBy = null;
           if (!room.rating_applied) {
             await applyRoomEloRating(room, winner === 0 ? 1 : 0);
           }
@@ -1350,6 +1439,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           }
           room.canceled = true;
           room.endReason = 'canceled';
+          room.drawOfferedBy = null;
           room.rating_applied = true; // Ensure no rating change
           const topPreElo = typeof room.topPlayer?.elo === 'number' ? room.topPlayer.elo : 1000;
           const bottomPreElo = typeof room.bottomPlayer?.elo === 'number' ? room.bottomPlayer.elo : 1000;
@@ -1369,37 +1459,150 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, room, version: room.version }));
           return;
-        } else if (body.type === 'DRAW') {
-          if (room.gameState && room.gameState.over === -1) {
-            if (room.drawOfferedBy && room.drawOfferedBy !== senderId) {
-              room.gameState.over = 2; // draw
-              room.endReason = 'draw';
-              if (!room.rating_applied) {
-                await applyRoomEloRating(room, 0.5);
-              }
-              room.version++;
-              updateAndBroadcastPresence(id);
-              broadcastToRoom(id, 'ROOM_SYNC', room);
-              broadcastToRoom(id, 'GAME_OVER', { winner: 2, draw: true, endReason: 'draw', eloResult: room.eloResult, version: room.version });
-            } else {
-              room.drawOfferedBy = senderId;
-              const offererName = resolvedSide === 'top' ? (room.topPlayer?.name || 'Top') : (room.bottomPlayer?.name || 'Bottom');
-              const drawChat = {
-                id: `m_${Date.now()}_draw`,
-                text: `🤝 ${offererName} offered a draw. Tap Draw to accept.`,
-                senderId: 'system',
-                senderName: 'System',
-                timestamp: Date.now()
-              };
-              if (!Array.isArray(room.chat)) room.chat = [];
-              room.chat.push(drawChat);
-              room.version++;
-              broadcastToRoom(id, 'CHAT', drawChat);
-              broadcastToRoom(id, 'ROOM_SYNC', room);
+        } else if (body.type === 'DRAW' || body.type === 'DRAW_OFFER') {
+          if (!room.gameState || room.gameState.over !== -1 || room.canceled) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'GAME_OVER', message: 'Game is not active.' }));
+            return;
+          }
+          if (room.vs_bot) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'BOT_GAME', message: 'Draw offers are not allowed in bot games.' }));
+            return;
+          }
+
+          const seatedPlayerId = resolvedSide === 'top' ? room.topPlayer?.id : room.bottomPlayer?.id;
+          const effectiveSender = seatedPlayerId || senderId;
+
+          // If body.type === 'DRAW' and an offer from opponent is already pending -> accept it!
+          if (room.drawOfferedBy && room.drawOfferedBy !== effectiveSender) {
+            room.gameState.over = 2; // draw
+            room.endReason = 'draw';
+            room.drawOfferedBy = null;
+            if (!room.rating_applied) {
+              await applyRoomEloRating(room, 0.5);
+            }
+            room.version++;
+            updateAndBroadcastPresence(id);
+            broadcastToRoom(id, 'ROOM_SYNC', room);
+            broadcastToRoom(id, 'DRAW_ACCEPTED', { version: room.version });
+            broadcastToRoom(id, 'GAME_OVER', { winner: 2, draw: true, endReason: 'draw', eloResult: room.eloResult, version: room.version });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, room, version: room.version }));
+            return;
+          }
+
+          // Check if already offered by this player
+          if (room.drawOfferedBy === effectiveSender) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, room, pending: true }));
+            return;
+          }
+
+          // Check 3-move cooldown after a rejected offer
+          const currentMoves = Array.isArray(room.moves) ? room.moves.length : 0;
+          if (room.drawRejectedMoveCount && typeof room.drawRejectedMoveCount[effectiveSender] === 'number') {
+            const rejectedAt = room.drawRejectedMoveCount[effectiveSender];
+            if (currentMoves - rejectedAt < 3) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                error: 'DRAW_COOLDOWN',
+                message: `You must play at least 3 more moves before offering a draw again (${currentMoves - rejectedAt}/3 played).`
+              }));
+              return;
             }
           }
+
+          room.drawOfferedBy = effectiveSender;
+          room.version++;
+          updateAndBroadcastPresence(id);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'DRAW_OFFER', { offeredBy: effectiveSender, version: room.version });
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, room }));
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
+        } else if (body.type === 'DRAW_ACCEPT') {
+          if (!room.gameState || room.gameState.over !== -1 || room.canceled) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'GAME_OVER', message: 'Game is not active.' }));
+            return;
+          }
+          if (room.vs_bot) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'BOT_GAME', message: 'Draw offers are not allowed in bot games.' }));
+            return;
+          }
+          if (!room.drawOfferedBy) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'NO_DRAW_OFFER', message: 'No draw offered.' }));
+            return;
+          }
+          const seatedPlayerId = resolvedSide === 'top' ? room.topPlayer?.id : room.bottomPlayer?.id;
+          const effectiveSender = seatedPlayerId || senderId;
+          if (room.drawOfferedBy === effectiveSender) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'CANNOT_ACCEPT_OWN_OFFER', message: 'Cannot accept your own draw offer.' }));
+            return;
+          }
+
+          room.gameState.over = 2; // draw
+          room.endReason = 'draw';
+          room.drawOfferedBy = null;
+          if (!room.rating_applied) {
+            await applyRoomEloRating(room, 0.5);
+          }
+          room.version++;
+          updateAndBroadcastPresence(id);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'DRAW_ACCEPTED', { version: room.version });
+          broadcastToRoom(id, 'GAME_OVER', { winner: 2, draw: true, endReason: 'draw', eloResult: room.eloResult, version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
+        } else if (body.type === 'DRAW_REJECT') {
+          if (!room.gameState || room.gameState.over !== -1 || room.canceled) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'GAME_OVER', message: 'Game is not active.' }));
+            return;
+          }
+          if (!room.drawOfferedBy) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'NO_DRAW_OFFER', message: 'No draw offered.' }));
+            return;
+          }
+          const seatedPlayerId = resolvedSide === 'top' ? room.topPlayer?.id : room.bottomPlayer?.id;
+          const effectiveSender = seatedPlayerId || senderId;
+          const proposer = room.drawOfferedBy;
+
+          // Record 3-move cooldown on the PROPOSER
+          if (!room.drawRejectedMoveCount) room.drawRejectedMoveCount = {};
+          const currentMoves = Array.isArray(room.moves) ? room.moves.length : 0;
+          room.drawRejectedMoveCount[proposer] = currentMoves;
+
+          room.drawOfferedBy = null;
+          room.version++;
+          updateAndBroadcastPresence(id);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'DRAW_DECLINED', { declinedBy: effectiveSender, version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
+        } else if (body.type === 'DRAW_CANCEL') {
+          if (!room.drawOfferedBy) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'NO_DRAW_OFFER', message: 'No draw offered.' }));
+            return;
+          }
+          const seatedPlayerId = resolvedSide === 'top' ? room.topPlayer?.id : room.bottomPlayer?.id;
+          const effectiveSender = seatedPlayerId || senderId;
+
+          room.drawOfferedBy = null;
+          room.version++;
+          updateAndBroadcastPresence(id);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'DRAW_DECLINED', { canceledBy: effectiveSender, version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
           return;
         } else if (body.type === 'REMATCH_OFFER') {
           let verifiedUser: VerifiedTgUser | null = null;
@@ -1439,6 +1642,9 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
               over: -1,
               ply: 0
             };
+            room.positionCounts = {
+              [getRoomPositionKey(room.gameState)]: 1
+            };
             room.moves = [];
             room.notation = [];
             room.rating_applied = false;
@@ -1447,6 +1653,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             delete room.resignedBy;
             room.canceled = false;
             room.drawOfferedBy = null;
+            delete room.drawRejectedMoveCount;
             room.rematchOfferedBy = null;
             room.version++;
             updateAndBroadcastPresence(id);
@@ -1536,6 +1743,9 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             over: -1,
             ply: 0
           };
+          room.positionCounts = {
+            [getRoomPositionKey(room.gameState)]: 1
+          };
           room.moves = [];
           room.notation = [];
           room.rating_applied = false;
@@ -1544,6 +1754,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           delete room.resignedBy;
           room.canceled = false;
           room.drawOfferedBy = null;
+          delete room.drawRejectedMoveCount;
           room.rematchOfferedBy = null;
 
           if (room.topPlayer?.tgId) {
@@ -1576,6 +1787,9 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             over: -1,
             ply: 0
           };
+          room.positionCounts = {
+            [getRoomPositionKey(room.gameState)]: 1
+          };
           room.moves = [];
           room.notation = [];
           room.rating_applied = false;
@@ -1584,6 +1798,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           delete room.resignedBy;
           room.canceled = false;
           room.drawOfferedBy = null;
+          delete room.drawRejectedMoveCount;
           room.rematchOfferedBy = null;
           room.version++;
           updateAndBroadcastPresence(id);

@@ -49,7 +49,7 @@ if (process.env.WEBHOOK_URL) {
   });
   server.listen(port, () => {
     logger.info({ port }, 'Quoridor bot & room server listening');
-    const configuredBotUser = (process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'panel4wordseekbot').replace(/^@/, '').trim();
+    const configuredBotUser = (process.env.BOT_USERNAME || process.env.PUBLIC_BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '').trim();
     const shortName = (process.env.MINIAPP_SHORT_NAME || '').trim();
     if (shortName) {
       logger.info(`[LINK FORMAT] Short-name Mini App: https://t.me/${configuredBotUser}/${shortName}?startapp=<gameId>`);
@@ -59,7 +59,7 @@ if (process.env.WEBHOOK_URL) {
   });
   await bot.start({
     onStart: (botInfo) => {
-      const activeUser = botInfo.username || process.env.BOT_USERNAME || 'panel4wordseekbot';
+      const activeUser = botInfo.username || (process.env.BOT_USERNAME || 'quoridorplay_bot').replace(/^@/, '');
       const shortName = (process.env.MINIAPP_SHORT_NAME || '').trim();
       const activeLinkFormat = shortName
         ? `https://t.me/${activeUser}/${shortName}?startapp=<gameId>`
