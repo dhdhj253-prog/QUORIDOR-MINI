@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: quoridor
+      POSTGRES_USER: quoridor
+      POSTGRES_PASSWORD: quoridor
+    volumes: [pgdata:/var/lib/postgresql/data]
+  bot:
+    build: .
+    env_file: .env
+    depends_on: [db]
+    ports: ["3000:3000"]
+volumes:
+  pgdata:

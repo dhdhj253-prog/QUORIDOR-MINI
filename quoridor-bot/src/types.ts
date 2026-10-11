@@ -1,13 +1,13 @@
 export type Player = 0 | 1;
 export type Move = { t: 'm'; to: number; pv?: number } | { t: 'w'; c: number } | { t: 'p' };
-export type GameStatus = 'pending' | 'active' | 'finished' | 'resigned' | 'forfeit';
+export type GameStatus = 'pending' | 'active' | 'finished' | 'resigned' | 'forfeit' | 'canceled';
 
 export interface State {
   blocked: number[];
   pos: [number, number];
   walls: [number, number];
   turn: Player;
-  over: -1 | 0 | 1;
+  over: -2 | -1 | 0 | 1 | 2;
   ply: number;
   lastMove?: { from?: number; to?: number; wall?: number };
   modeByPlayer?: { [id: string]: 'move' | 'wall' | 'resign_confirm' };

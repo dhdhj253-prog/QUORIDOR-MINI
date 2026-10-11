@@ -18,6 +18,7 @@ import {
 } from './ui.js';
 import { renderProfileCard } from '../render/profile.js';
 import { registerReplayHandlers, handleReplay, handleReview } from './replay-handlers.js';
+import { createBotRoom } from '../rooms.js';
 
 export function registerCommands(bot: Bot) {
   bot.command('start', async ctx => {
@@ -85,13 +86,19 @@ export function registerCommands(bot: Bot) {
       await upsertUser({ id: ctx.from.id, name: ctx.from.first_name, username: ctx.from.username, is_registered: true });
     }
     const webAppUrl = process.env.WEBAPP_URL || '';
-    const kb = new InlineKeyboard();
+    const botRoomId = 'bot_' + Math.random().toString(36).substring(2, 8);
+    createBotRoom(botRoomId);
+    const directBotUrl = `${webAppUrl}?gameId=${botRoomId}`;
+
+    const kb = new InlineKeyboard()
+      .switchInline('Play with a friend (1v1)', '')
+      .row();
+
     if (webAppUrl.startsWith('https://')) {
-      kb.webApp('🤖 Play with Bot (Mini App)', `${webAppUrl}?mode=bot`).row();
-      kb.webApp('✨ Launch Mini App Arena', webAppUrl).row();
+      kb.webApp('Play vs Bot (Medium)', directBotUrl);
+    } else {
+      kb.url('Play vs Bot (Medium)', directBotUrl);
     }
-    kb.text('👤 My Profile', 'nav_profile')
-      .text('🏆 Leaderboard', 'nav_leaderboard');
 
     await ctx.reply('⚔️ <b>Quoridor Game Lobby</b>\n\nChoose your game mode:', {
       parse_mode: 'HTML',
@@ -161,10 +168,20 @@ export function registerCommands(bot: Bot) {
   bot.callbackQuery('nav_newgame', async ctx => {
     if (!ctx.from) return;
     await ctx.answerCallbackQuery();
+    const webAppUrl = process.env.WEBAPP_URL || '';
+    const botRoomId = 'bot_' + Math.random().toString(36).substring(2, 8);
+    createBotRoom(botRoomId);
+    const directBotUrl = `${webAppUrl}?gameId=${botRoomId}`;
+
     const kb = new InlineKeyboard()
-      .switchInline('👥 Play with friends', '')
-      .row()
-      .text('🤖 Practice vs Bot', 'practice');
+      .switchInline('Play with a friend (1v1)', '')
+      .row();
+
+    if (webAppUrl.startsWith('https://')) {
+      kb.webApp('Play vs Bot (Medium)', directBotUrl);
+    } else {
+      kb.url('Play vs Bot (Medium)', directBotUrl);
+    }
 
     await ctx.reply('⚔️ <b>Quoridor Game Lobby</b>\n\nChoose your game mode:', {
       parse_mode: 'HTML',

@@ -49,6 +49,12 @@ export async function upsertUser(u: { id: number; name: string; username?: strin
   );
 }
 
+export async function getOrCreateUserElo(tgId: number, name: string = 'Player', username?: string): Promise<number> {
+  await upsertUser({ id: tgId, name, username });
+  const q = await pool.query<{ elo: number }>('SELECT elo FROM users WHERE tg_id = $1', [tgId]);
+  return q.rows[0]?.elo != null ? Math.max(100, Number(q.rows[0].elo)) : 1000;
+}
+
 export function initialState(first: Player = 0): State {
   return { blocked: Array(64).fill(0), pos: [60, 3], walls: [8, 8], turn: first, over: -1, ply: 0 };
 }

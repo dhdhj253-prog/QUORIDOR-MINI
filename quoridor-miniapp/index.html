@@ -80,6 +80,7 @@
           <span class="player-name-text" id="p2-name">Waiting for opponent…</span>
           <div class="player-meta-row">
             <span class="elo-pill" id="p2-elo-badge">1000</span>
+            <span class="elo-delta-small hidden" id="p2-elo-delta"></span>
             <span class="player-turn-tag" id="p2-turn-tag"></span>
           </div>
         </div>
@@ -104,6 +105,26 @@
         </div>
         <!-- Quoridor Grid -->
         <div class="quoridor-grid-8x8" id="quoridor-grid"></div>
+        <!-- In-App Board Confirm Dialog Overlay -->
+        <div class="board-confirm-overlay hidden" id="board-confirm-dialog">
+          <div class="board-confirm-card">
+            <p class="board-confirm-text" id="board-confirm-text">Do you really want to resign?</p>
+            <div class="board-confirm-actions">
+              <button type="button" class="board-confirm-btn board-confirm-yes" id="board-confirm-yes">Yes</button>
+              <button type="button" class="board-confirm-btn board-confirm-no" id="board-confirm-no">No</button>
+            </div>
+          </div>
+        </div>
+        <!-- In-App Rematch Flow Dialog Overlay -->
+        <div class="board-confirm-overlay hidden" id="rematch-dialog">
+          <div class="board-confirm-card">
+            <p class="board-confirm-text" id="rematch-dialog-text">Do you want to propose a rematch to your opponent?</p>
+            <div class="board-confirm-actions" id="rematch-dialog-actions">
+              <button type="button" class="board-confirm-btn btn-accept" id="rematch-btn-primary">Yes</button>
+              <button type="button" class="board-confirm-btn btn-cancel" id="rematch-btn-secondary">No</button>
+            </div>
+          </div>
+        </div>
         <!-- Horizontal coordinates a-h -->
         <div class="board-coords-x">
           <span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span>
@@ -119,6 +140,7 @@
           <span class="player-name-text" id="p1-name">Player</span>
           <div class="player-meta-row">
             <span class="elo-pill" id="p1-elo-badge">1000</span>
+            <span class="elo-delta-small hidden" id="p1-elo-delta"></span>
             <span class="player-turn-tag" id="p1-turn-tag">Playing</span>
           </div>
         </div>
@@ -150,6 +172,12 @@
         <span>👁 You are spectating this match in read-only mode</span>
       </div>
 
+      <!-- Game Over status bar replacing controls -->
+      <div class="gameover-bar hidden" id="gameover-bar">
+        <span class="gameover-result-text" id="gameover-result-text">You won - reached the goal</span>
+        <button class="gameover-rematch-btn" id="btn-gameover-rematch">Rematch</button>
+      </div>
+
       <!-- GameFactory Bottom Bar Tabs matching reference screenshots -->
       <div class="gamefactory-tab-bar">
         <button class="tab-btn" id="tab-btn-menu">
@@ -167,6 +195,10 @@
         <button class="tab-btn" id="btn-cancel-game">
           <span class="tab-icon">✖</span>
           <span class="tab-label">Cancel</span>
+        </button>
+        <button class="tab-btn" id="tab-btn-notation">
+          <span class="tab-icon">📜</span>
+          <span class="tab-label">Notation</span>
         </button>
         <button class="tab-btn" id="tab-btn-chat">
           <span class="tab-icon">💬</span>
@@ -260,22 +292,8 @@
       </div>
     </div>
 
-    <!-- Victory Modal -->
-    <div class="game-modal hidden" id="gameover-modal">
-      <div class="modal-content-box">
-        <div style="font-size: 2.8rem;" id="modal-icon">🏆</div>
-        <h2 class="modal-title-bold" id="modal-title">Victory</h2>
-        <p class="modal-subtitle-text" id="modal-desc">Reached the opponent baseline!</p>
-        
-        <div class="modal-rating-pill-row">
-          <span class="elo-pill" id="modal-elo-pill">1016</span>
-          <span id="modal-delta-text" style="font-weight: 700; color: #10b981;">+16 ELO</span>
-        </div>
-
-        <button class="modal-btn-full" id="btn-modal-rematch">Play Again</button>
-        <button class="modal-btn-secondary" id="btn-modal-share">Share Result</button>
-      </div>
-    </div>
+    <!-- Floating Toast Notification -->
+    <div class="game-toast hidden" id="game-toast"></div>
   </div>
 
   <script type="module" src="./src/main.ts"></script>

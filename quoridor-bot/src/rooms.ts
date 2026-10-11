@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import crypto from 'node:crypto';
 import { calculateServerElo } from './engine/elo.js';
+import { chooseBotMove } from './engine/bot.js';
 
 export interface RoomPlayer {
   id: string;
@@ -101,17 +102,44 @@ export function formatTelegramName(user: { first_name: string; last_name?: strin
   return 'Player';
 }
 
+export const CANCEL_MAX_MOVES = 6;
+
+export interface NotationRow {
+  num: number;
+  p1: string;
+  p2?: string;
+}
+
+export function formatNotation(move: any): string {
+  if (!move) return '';
+  if (move.type === 'move' && typeof move.to === 'number') {
+    const r = Math.floor(move.to / 8) + 1;
+    const c = String.fromCharCode('a'.charCodeAt(0) + (move.to % 8));
+    return `${c}${r}`;
+  }
+  if (move.type === 'wall' && typeof move.cell === 'number') {
+    const r = Math.floor(move.cell / 8) + 1;
+    const c = String.fromCharCode('a'.charCodeAt(0) + (move.cell % 8));
+    return `W ${c}${r}`;
+  }
+  return '';
+}
+
 export interface RoomState {
   id: string;
   version: number;
   rated: boolean;
   vs_bot?: boolean;
+  canceled?: boolean;
+  endReason?: 'goal' | 'resigned' | 'draw' | 'canceled';
+  resignedBy?: string;
   creatorSide?: 'top' | 'bottom';
   creator?: { id: string; name: string; username?: string; photoUrl?: string };
   topPlayer?: RoomPlayer;
   bottomPlayer?: RoomPlayer;
   gameState?: any;
   moves: any[];
+  notation?: NotationRow[];
   chat: any[];
   lastActive: number;
   rating_applied?: boolean;
@@ -123,6 +151,7 @@ export interface RoomState {
     rated: boolean;
   };
   drawOfferedBy?: string | null;
+  rematchOfferedBy?: string | null;
   presence?: RoomPresence;
 }
 
@@ -198,7 +227,6 @@ export function getPlayerSideInRoom(room: RoomState, playerId?: string, tgId?: n
 
 export function computeRoomPresence(room: RoomState): RoomPresence {
   const trackers = getRoomTrackers(room.id);
-  const isGameRunning = !!room.gameState && room.gameState.over === -1 && Array.isArray(room.moves) && room.moves.length > 0;
 
   let topStatus: PlayerPresenceStatus;
   if (!room.topPlayer) {
@@ -206,18 +234,18 @@ export function computeRoomPresence(room: RoomState): RoomPresence {
   } else if (trackers.top.disconnectedAt) {
     topStatus = 'disconnected';
   } else {
-    topStatus = isGameRunning ? 'playing' : 'joined';
+    topStatus = 'playing';
   }
 
   let bottomStatus: PlayerPresenceStatus;
   if (room.vs_bot) {
-    bottomStatus = isGameRunning ? 'playing' : 'joined';
+    bottomStatus = 'playing';
   } else if (!room.bottomPlayer) {
     bottomStatus = 'waiting';
   } else if (trackers.bottom.disconnectedAt) {
     bottomStatus = 'disconnected';
   } else {
-    bottomStatus = isGameRunning ? 'playing' : 'joined';
+    bottomStatus = 'playing';
   }
 
   return {
@@ -243,6 +271,9 @@ export function updateAndBroadcastPresence(roomId: string, force = false) {
   room.presence = nextPresence;
 
   if (changed || force) {
+    room.version++;
+    console.log(`[PRESENCE] Room ${roomId} presence changed to v${room.version}: top=${nextPresence.top}, bottom=${nextPresence.bottom}`);
+    broadcastToRoom(roomId, 'ROOM_SYNC', room);
     broadcastToRoom(roomId, 'PRESENCE', nextPresence);
   }
 }
@@ -254,10 +285,51 @@ export function markPlayerOnline(roomId: string, side: 'top' | 'bottom') {
     clearTimeout(t.graceTimer);
     t.graceTimer = null;
   }
+  const wasDisconnected = !!t.disconnectedAt;
   t.disconnectedAt = null;
   t.lastHeartbeat = Date.now();
-  updateAndBroadcastPresence(roomId);
+  updateAndBroadcastPresence(roomId, wasDisconnected);
 }
+
+export function sweepRoomPresence() {
+  const now = Date.now();
+  for (const [roomId, room] of rooms.entries()) {
+    const trackers = roomPresenceTrackers.get(roomId);
+    if (!trackers) continue;
+
+    let changed = false;
+    if (room.topPlayer && !trackers.top.disconnectedAt) {
+      if (trackers.top.lastHeartbeat > 0 && (now - trackers.top.lastHeartbeat > 15000)) {
+        trackers.top.disconnectedAt = now;
+        changed = true;
+        console.log(`[SWEEPER] Top player in room ${roomId} timed out (>15s without heartbeat) -> Disconnected`);
+      }
+    }
+
+    if (room.bottomPlayer && !room.vs_bot && !trackers.bottom.disconnectedAt) {
+      if (trackers.bottom.lastHeartbeat > 0 && (now - trackers.bottom.lastHeartbeat > 15000)) {
+        trackers.bottom.disconnectedAt = now;
+        changed = true;
+        console.log(`[SWEEPER] Bottom player in room ${roomId} timed out (>15s without heartbeat) -> Disconnected`);
+      }
+    }
+
+    if (changed) {
+      updateAndBroadcastPresence(roomId);
+    }
+  }
+}
+
+let presenceSweeperInterval: NodeJS.Timeout | null = null;
+export function startPresenceSweeper(intervalMs = 5000) {
+  if (presenceSweeperInterval) return;
+  presenceSweeperInterval = setInterval(sweepRoomPresence, intervalMs);
+  if (presenceSweeperInterval && typeof presenceSweeperInterval.unref === 'function') {
+    presenceSweeperInterval.unref();
+  }
+}
+
+startPresenceSweeper(5000);
 
 export function handleConnectionClosed(roomId: string, connId: string) {
   const room = rooms.get(roomId);
@@ -289,14 +361,24 @@ export function handleConnectionClosed(roomId: string, connId: string) {
   }
 }
 
+export function createBotRoom(id: string): RoomState {
+  const r = getOrCreateRoom(id);
+  r.vs_bot = true;
+  r.rated = false;
+  return r;
+}
+
 export function getOrCreateRoom(id: string): RoomState {
   let r = rooms.get(id);
   if (!r) {
+    const isBot = id.startsWith('bot_') || id.includes('bot');
     r = {
       id,
       version: 1,
-      rated: true,
+      rated: !isBot,
+      vs_bot: isBot,
       moves: [],
+      notation: [],
       chat: [],
       lastActive: Date.now()
     };
@@ -321,6 +403,66 @@ export function broadcastToRoom(roomId: string, event: string, data: any) {
   }
 }
 
+export function scheduleBotTurn(roomId: string) {
+  const room = rooms.get(roomId);
+  if (!room || !room.vs_bot || !room.gameState || room.gameState.over !== -1 || room.canceled) {
+    return;
+  }
+  const botSide = room.topPlayer?.id === 'tg_bot' ? 'top' : room.bottomPlayer?.id === 'tg_bot' ? 'bottom' : null;
+  if (!botSide) return;
+  const botWho = botSide === 'top' ? 0 : 1;
+  if (room.gameState.turn !== botWho) return;
+
+  const delayMs = 700 + Math.floor(Math.random() * 800);
+  setTimeout(async () => {
+    const r = rooms.get(roomId);
+    if (!r || !r.vs_bot || !r.gameState || r.gameState.over !== -1 || r.canceled) return;
+    if (r.gameState.turn !== botWho) return;
+
+    const move = chooseBotMove(r.gameState as any, botWho);
+    if (!move) return;
+
+    if (move.type === 'move') {
+      r.gameState.pos[botWho] = move.to;
+      const targetRow = move.to >> 3;
+      if ((botWho === 0 && targetRow === 0) || (botWho === 1 && targetRow === 7)) {
+        r.gameState.over = botWho;
+        r.endReason = 'goal';
+      } else {
+        r.gameState.turn = (1 - botWho) as any;
+      }
+    } else if (move.type === 'wall') {
+      r.gameState.blocked[move.cell] = 1;
+      r.gameState.walls[botWho] = Math.max(0, r.gameState.walls[botWho] - 1);
+      r.gameState.turn = (1 - botWho) as any;
+    }
+
+    r.gameState.ply = (r.gameState.ply || 0) + 1;
+    const notStr = formatNotation(move);
+    r.moves.push({ who: botWho, move, notation: notStr });
+    if (!Array.isArray(r.notation)) r.notation = [];
+    if (botWho === 0) {
+      r.notation.push({ num: r.notation.length + 1, p1: notStr });
+    } else {
+      if (r.notation.length === 0 || r.notation[r.notation.length - 1].p2) {
+        r.notation.push({ num: r.notation.length + 1, p1: '...', p2: notStr });
+      } else {
+        r.notation[r.notation.length - 1].p2 = notStr;
+      }
+    }
+
+    r.version++;
+    if (r.gameState.over !== -1) {
+      await applyRoomEloRating(r, r.gameState.over === 0 ? 1 : 0);
+    }
+    broadcastToRoom(roomId, 'ROOM_SYNC', r);
+    broadcastToRoom(roomId, 'MOVE', { move, who: botWho, version: r.version });
+    if (r.gameState.over !== -1) {
+      broadcastToRoom(roomId, 'GAME_OVER', { winner: r.gameState.over, endReason: r.endReason, eloResult: r.eloResult, version: r.version });
+    }
+  }, delayMs);
+}
+
 export async function applyRoomEloRating(room: RoomState, scoreTop: number) {
   if (room.rating_applied) return;
   room.rating_applied = true;
@@ -331,7 +473,7 @@ export async function applyRoomEloRating(room: RoomState, scoreTop: number) {
   const bottomPreElo = typeof bottomPlayer?.elo === 'number' ? bottomPlayer.elo : 1000;
 
   const hasMoves = Array.isArray(room.moves) && room.moves.length > 0;
-  const isEligible = room.rated && !room.vs_bot && !!topPlayer && !!bottomPlayer && hasMoves;
+  const isEligible = room.rated && !room.vs_bot && !!topPlayer && !!bottomPlayer && hasMoves && !room.canceled;
 
   if (!isEligible || !topPlayer || !bottomPlayer) {
     room.eloResult = {
@@ -362,8 +504,9 @@ export async function applyRoomEloRating(room: RoomState, scoreTop: number) {
   };
 
   try {
-    const { pool } = await import('./db/index.js');
+    const { pool, upsertUser } = await import('./db/index.js');
     if (topPlayer.tgId) {
+      await upsertUser({ id: topPlayer.tgId, name: topPlayer.name, username: topPlayer.username });
       await pool.query(
         `UPDATE users SET elo = $1, peak_elo = GREATEST(peak_elo, $1),
          wins = wins + $2, losses = losses + $3 WHERE tg_id = $4`,
@@ -371,6 +514,7 @@ export async function applyRoomEloRating(room: RoomState, scoreTop: number) {
       );
     }
     if (bottomPlayer.tgId) {
+      await upsertUser({ id: bottomPlayer.tgId, name: bottomPlayer.name, username: bottomPlayer.username });
       await pool.query(
         `UPDATE users SET elo = $1, peak_elo = GREATEST(peak_elo, $1),
          wins = wins + $2, losses = losses + $3 WHERE tg_id = $4`,
@@ -557,6 +701,38 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
     return true;
   }
 
+  // POST /api/room/disconnect (beacon on pagehide and visibilitychange->hidden)
+  if ((pathname === '/api/room/disconnect' || pathname === '/api/room/beacon') && req.method === 'POST') {
+    let bodyStr = '';
+    req.on('data', chunk => { bodyStr += chunk; });
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(bodyStr || '{}');
+        const id = body.id || 'default';
+        const room = rooms.get(id);
+        if (room) {
+          const tgId = body.tgId ? Number(body.tgId) : undefined;
+          const playerId = body.playerId || '';
+          const side = getPlayerSideInRoom(room, playerId, tgId);
+          if (side) {
+            const trackers = getRoomTrackers(id);
+            if (!trackers[side].disconnectedAt) {
+              trackers[side].disconnectedAt = Date.now();
+              console.log(`[PRESENCE] Beacon disconnect for ${side} in room ${id}`);
+              updateAndBroadcastPresence(id);
+            }
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      }
+    });
+    return true;
+  }
+
   // GET /api/room?id=XYZ
   if (pathname === '/api/room' && req.method === 'GET') {
     const id = urlObj.searchParams.get('id') || 'default';
@@ -570,7 +746,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
   if (pathname === '/api/room/rejoin' && req.method === 'POST') {
     let bodyStr = '';
     req.on('data', chunk => { bodyStr += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const body = JSON.parse(bodyStr || '{}');
         const id = body.id || 'default';
@@ -608,6 +784,12 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             room.topPlayer!.lastName = verifiedUser.last_name;
             room.topPlayer!.username = verifiedUser.username;
           }
+          if (room.topPlayer!.tgId) {
+            try {
+              const { getOrCreateUserElo } = await import('./db/index.js');
+              room.topPlayer!.elo = await getOrCreateUserElo(room.topPlayer!.tgId, room.topPlayer!.name, room.topPlayer!.username);
+            } catch {}
+          }
           markPlayerOnline(id, 'top');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, hasSeat: true, seat: 'top', room, player: room.topPlayer }));
@@ -622,6 +804,12 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             room.bottomPlayer!.firstName = verifiedUser.first_name;
             room.bottomPlayer!.lastName = verifiedUser.last_name;
             room.bottomPlayer!.username = verifiedUser.username;
+          }
+          if (room.bottomPlayer!.tgId) {
+            try {
+              const { getOrCreateUserElo } = await import('./db/index.js');
+              room.bottomPlayer!.elo = await getOrCreateUserElo(room.bottomPlayer!.tgId, room.bottomPlayer!.name, room.bottomPlayer!.username);
+            } catch {}
           }
           markPlayerOnline(id, 'bottom');
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -707,6 +895,12 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             room.topPlayer!.lastName = verifiedUser.last_name;
             room.topPlayer!.username = verifiedUser.username;
           }
+          if (room.topPlayer!.tgId) {
+            try {
+              const { getOrCreateUserElo } = await import('./db/index.js');
+              room.topPlayer!.elo = await getOrCreateUserElo(room.topPlayer!.tgId, room.topPlayer!.name, room.topPlayer!.username);
+            } catch {}
+          }
           markPlayerOnline(id, 'top');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, room, player: room.topPlayer, seat: 'top', reconnected: true }));
@@ -721,6 +915,12 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             room.bottomPlayer!.firstName = verifiedUser.first_name;
             room.bottomPlayer!.lastName = verifiedUser.last_name;
             room.bottomPlayer!.username = verifiedUser.username;
+          }
+          if (room.bottomPlayer!.tgId) {
+            try {
+              const { getOrCreateUserElo } = await import('./db/index.js');
+              room.bottomPlayer!.elo = await getOrCreateUserElo(room.bottomPlayer!.tgId, room.bottomPlayer!.name, room.bottomPlayer!.username);
+            } catch {}
           }
           markPlayerOnline(id, 'bottom');
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -775,15 +975,19 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           room.rated = false;
         }
 
-        let playerElo = typeof body.elo === 'number' ? body.elo : 1000;
+        let playerElo = 1000;
         if (tgId) {
           try {
-            const { pool } = await import('./db/index.js');
-            const u = await pool.query('SELECT elo FROM users WHERE tg_id = $1', [tgId]);
-            if (u.rows[0]?.elo != null) {
-              playerElo = Number(u.rows[0].elo);
+            const { getOrCreateUserElo } = await import('./db/index.js');
+            playerElo = await getOrCreateUserElo(tgId, playerName, verifiedUser?.username);
+          } catch (err) {
+            console.warn('[SERVER] Could not load Elo from DB:', err);
+            if (typeof body.elo === 'number' && body.elo >= 100) {
+              playerElo = body.elo;
             }
-          } catch {}
+          }
+        } else if (typeof body.elo === 'number' && body.elo >= 100) {
+          playerElo = body.elo;
         }
         playerElo = Math.max(100, playerElo);
 
@@ -799,10 +1003,30 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           username: verifiedUser?.username
         };
 
-        if (assignedSide === 'top') {
-          room.topPlayer = player;
+        if (room.vs_bot) {
+          room.rated = false;
+          const botSide = assignedSide === 'top' ? 'bottom' : 'top';
+          const botPlayer: RoomPlayer = {
+            id: 'tg_bot',
+            tgId: 0,
+            name: 'Quoridor Bot',
+            elo: 1000,
+            side: botSide,
+            username: 'quoridor_bot'
+          };
+          if (assignedSide === 'top') {
+            room.topPlayer = player;
+            room.bottomPlayer = botPlayer;
+          } else {
+            room.bottomPlayer = player;
+            room.topPlayer = botPlayer;
+          }
         } else {
-          room.bottomPlayer = player;
+          if (assignedSide === 'top') {
+            room.topPlayer = player;
+          } else {
+            room.bottomPlayer = player;
+          }
         }
 
         // When both players are present, ensure standard board state is ready
@@ -823,6 +1047,10 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
         broadcastToRoom(id, 'ROOM_SYNC', room);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, room, player, seat: assignedSide }));
+
+        if (room.vs_bot && room.topPlayer?.id === 'tg_bot') {
+          scheduleBotTurn(id);
+        }
       } catch (err: any) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
@@ -848,11 +1076,12 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           if (leaverSide) {
             const winner = leaverSide === 'top' ? 1 : 0;
             room.gameState.over = winner;
+            room.endReason = 'resigned';
             if (!room.rating_applied) {
               await applyRoomEloRating(room, winner === 0 ? 1 : 0);
             }
             broadcastToRoom(id, 'ROOM_SYNC', room);
-            broadcastToRoom(id, 'GAME_OVER', { winner, forfeit: true, eloResult: room.eloResult, version: room.version });
+            broadcastToRoom(id, 'GAME_OVER', { winner, forfeit: true, endReason: 'resigned', eloResult: room.eloResult, version: room.version });
           }
         } else if (!isGameActive) {
           if (room.topPlayer?.id === playerId) {
@@ -902,12 +1131,12 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
         }
         const resolvedSide = getPlayerSideInRoom(room, senderId, senderTgId);
 
-        // Spectator Protection: Only assigned players can move pawns or resign!
-        if (body.type === 'MOVE' || body.type === 'RESIGN') {
+        // Spectator Protection: Only assigned players can move pawns, resign, or cancel!
+        if (body.type === 'MOVE' || body.type === 'RESIGN' || body.type === 'CANCEL') {
           const isRealPlayer = resolvedSide !== null;
           if (!isRealPlayer) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'SPECTATOR_READONLY', message: 'Spectators are read-only and cannot move or resign.' }));
+            res.end(JSON.stringify({ error: 'SPECTATOR_READONLY', message: 'Spectators are read-only and cannot move, resign, or cancel.' }));
             return;
           }
           if (body.type === 'MOVE') {
@@ -938,6 +1167,7 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
               // P0 (Top) goal is row 0; P1 (Bottom) goal is row 7
               if ((expectedTurn === 0 && targetRow === 0) || (expectedTurn === 1 && targetRow === 7)) {
                 state.over = expectedTurn;
+                room.endReason = 'goal';
               } else {
                 state.turn = 1 - expectedTurn;
               }
@@ -960,18 +1190,37 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
               state.turn = 1 - expectedTurn;
             }
             state.ply = (state.ply || 0) + 1;
-            if (body.record) {
-              room.moves.push(body.record);
+            const notStr = formatNotation(move);
+            const moveRecord = body.record || { move, who: expectedTurn, notation: notStr };
+            room.moves.push(moveRecord);
+
+            if (!Array.isArray(room.notation)) room.notation = [];
+            if (expectedTurn === 0) {
+              room.notation.push({
+                num: room.notation.length + 1,
+                p1: notStr
+              });
             } else {
-              room.moves.push({ move, who: expectedTurn });
+              if (room.notation.length > 0 && !room.notation[room.notation.length - 1].p2) {
+                room.notation[room.notation.length - 1].p2 = notStr;
+              } else {
+                room.notation.push({
+                  num: room.notation.length + 1,
+                  p1: '...',
+                  p2: notStr
+                });
+              }
             }
           } else if (body.state) {
             // Fallback if full state was sent
             room.gameState = body.state;
           }
 
-          if (state.over !== -1 && !room.rating_applied) {
-            await applyRoomEloRating(room, state.over === 0 ? 1 : 0);
+          if (state.over !== -1) {
+            room.endReason = 'goal';
+            if (!room.rating_applied) {
+              await applyRoomEloRating(room, state.over === 0 ? 1 : 0);
+            }
           }
 
           room.version++;
@@ -981,12 +1230,22 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           broadcastToRoom(id, 'ROOM_SYNC', room);
           broadcastToRoom(id, 'MOVE', { ...body, version: room.version });
           if (state.over !== -1) {
-            broadcastToRoom(id, 'GAME_OVER', { winner: state.over, eloResult: room.eloResult, version: room.version });
+            broadcastToRoom(id, 'GAME_OVER', { winner: state.over, endReason: room.endReason, eloResult: room.eloResult, version: room.version });
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, room, version: room.version }));
+
+          if (room.vs_bot && state.over === -1 && !room.canceled) {
+            scheduleBotTurn(id);
+          }
           return;
         } else if (body.type === 'CHAT') {
+          if (room.vs_bot) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'CHAT_DISABLED', message: 'Chat is disabled in bot games.' }));
+            return;
+          }
+
           let verifiedUser: VerifiedTgUser | null = null;
           if (body.initData) {
             verifiedUser = verifyTelegramInitData(body.initData, process.env.BOT_TOKEN || '');
@@ -1059,6 +1318,8 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           if (room.gameState) {
             room.gameState.over = winner;
           }
+          room.endReason = 'resigned';
+          room.resignedBy = senderId;
           if (!room.rating_applied) {
             await applyRoomEloRating(room, winner === 0 ? 1 : 0);
           }
@@ -1067,7 +1328,44 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           console.log(`[SERVER] Resign received from ${senderId} in room ${id}`);
           console.log(`[SERVER] Broadcasting room state v${room.version} for room ${id}`);
           broadcastToRoom(id, 'ROOM_SYNC', room);
-          broadcastToRoom(id, 'GAME_OVER', { winner, eloResult: room.eloResult, version: room.version });
+          broadcastToRoom(id, 'GAME_OVER', { winner, endReason: 'resigned', resignedBy: senderId, eloResult: room.eloResult, version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
+        } else if (body.type === 'CANCEL') {
+          const totalMoves = (room.gameState?.ply ?? (room.moves?.length ?? 0));
+          if (totalMoves >= CANCEL_MAX_MOVES) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'CANCEL_NOT_ALLOWED', message: 'Cancel is only allowed in the early game (fewer than 6 moves).' }));
+            return;
+          }
+          if (room.gameState && room.gameState.over !== -1) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'GAME_OVER', message: 'Game has already finished.' }));
+            return;
+          }
+
+          if (room.gameState) {
+            room.gameState.over = -2; // -2 indicates canceled
+          }
+          room.canceled = true;
+          room.endReason = 'canceled';
+          room.rating_applied = true; // Ensure no rating change
+          const topPreElo = typeof room.topPlayer?.elo === 'number' ? room.topPlayer.elo : 1000;
+          const bottomPreElo = typeof room.bottomPlayer?.elo === 'number' ? room.bottomPlayer.elo : 1000;
+          room.eloResult = {
+            topDelta: 0,
+            bottomDelta: 0,
+            topNewElo: topPreElo,
+            bottomNewElo: bottomPreElo,
+            rated: false
+          };
+          room.version++;
+          updateAndBroadcastPresence(id);
+          console.log(`[SERVER] Cancel received from ${senderId} in room ${id} (total moves: ${totalMoves})`);
+          console.log(`[SERVER] Broadcasting room state v${room.version} for room ${id} (canceled)`);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'GAME_OVER', { winner: -2, canceled: true, endReason: 'canceled', resultText: 'No result (canceled)', eloResult: room.eloResult, version: room.version });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, room, version: room.version }));
           return;
@@ -1075,13 +1373,14 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           if (room.gameState && room.gameState.over === -1) {
             if (room.drawOfferedBy && room.drawOfferedBy !== senderId) {
               room.gameState.over = 2; // draw
+              room.endReason = 'draw';
               if (!room.rating_applied) {
                 await applyRoomEloRating(room, 0.5);
               }
               room.version++;
               updateAndBroadcastPresence(id);
               broadcastToRoom(id, 'ROOM_SYNC', room);
-              broadcastToRoom(id, 'GAME_OVER', { winner: 2, draw: true, eloResult: room.eloResult, version: room.version });
+              broadcastToRoom(id, 'GAME_OVER', { winner: 2, draw: true, endReason: 'draw', eloResult: room.eloResult, version: room.version });
             } else {
               room.drawOfferedBy = senderId;
               const offererName = resolvedSide === 'top' ? (room.topPlayer?.name || 'Top') : (room.bottomPlayer?.name || 'Bottom');
@@ -1102,6 +1401,172 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, room }));
           return;
+        } else if (body.type === 'REMATCH_OFFER') {
+          let verifiedUser: VerifiedTgUser | null = null;
+          if (body.initData) {
+            verifiedUser = verifyTelegramInitData(body.initData, process.env.BOT_TOKEN || '');
+          }
+          let senderTgId = verifiedUser?.id;
+          let senderId = verifiedUser ? `tg_${senderTgId}` : (body.senderId || body.playerId || '');
+          if (!senderTgId && senderId.startsWith('tg_')) {
+            const parsed = parseInt(senderId.slice(3), 10);
+            if (!isNaN(parsed)) senderTgId = parsed;
+          }
+
+          const isTop = room.topPlayer && (room.topPlayer.id === senderId || (senderTgId && room.topPlayer.tgId === senderTgId));
+          const isBottom = room.bottomPlayer && (room.bottomPlayer.id === senderId || (senderTgId && room.bottomPlayer.tgId === senderTgId));
+
+          if (!isTop && !isBottom) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'FORBIDDEN', message: 'Only seated players can offer rematch.' }));
+            return;
+          }
+
+          if (room.vs_bot) {
+            // Swap players and their sides
+            const prevTop = room.topPlayer;
+            const prevBottom = room.bottomPlayer;
+            if (prevTop) prevTop.side = 'bottom';
+            if (prevBottom) prevBottom.side = 'top';
+            room.topPlayer = prevBottom;
+            room.bottomPlayer = prevTop;
+
+            room.gameState = {
+              turn: 0,
+              pos: [60, 3],
+              walls: [8, 8],
+              blocked: new Array(64).fill(0),
+              over: -1,
+              ply: 0
+            };
+            room.moves = [];
+            room.notation = [];
+            room.rating_applied = false;
+            delete room.eloResult;
+            delete room.endReason;
+            delete room.resignedBy;
+            room.canceled = false;
+            room.drawOfferedBy = null;
+            room.rematchOfferedBy = null;
+            room.version++;
+            updateAndBroadcastPresence(id);
+            console.log(`[SERVER] Rematch accepted by Bot in room ${id}. Sides swapped: Top=${room.topPlayer?.name}, Bottom=${room.bottomPlayer?.name}`);
+            broadcastToRoom(id, 'ROOM_SYNC', room);
+            broadcastToRoom(id, 'REMATCH_ACCEPTED', { version: room.version });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, room, version: room.version }));
+
+            if (room.topPlayer?.id === 'tg_bot') {
+              scheduleBotTurn(id);
+            }
+            return;
+          }
+
+          room.rematchOfferedBy = senderId;
+          room.version++;
+          updateAndBroadcastPresence(id);
+          console.log(`[SERVER] Rematch offered by ${senderId} in room ${id}`);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'REMATCH_OFFER', { offeredBy: senderId, version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
+        } else if (body.type === 'REMATCH_CANCEL' || body.type === 'REMATCH_REJECT') {
+          let verifiedUser: VerifiedTgUser | null = null;
+          if (body.initData) {
+            verifiedUser = verifyTelegramInitData(body.initData, process.env.BOT_TOKEN || '');
+          }
+          let senderTgId = verifiedUser?.id;
+          let senderId = verifiedUser ? `tg_${senderTgId}` : (body.senderId || body.playerId || '');
+          if (!senderTgId && senderId.startsWith('tg_')) {
+            const parsed = parseInt(senderId.slice(3), 10);
+            if (!isNaN(parsed)) senderTgId = parsed;
+          }
+
+          room.rematchOfferedBy = null;
+          room.version++;
+          updateAndBroadcastPresence(id);
+          console.log(`[SERVER] Rematch ${body.type === 'REMATCH_CANCEL' ? 'cancelled' : 'rejected'} by ${senderId} in room ${id}`);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'REMATCH_DECLINED', { declinedBy: senderId, version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
+        } else if (body.type === 'REMATCH_ACCEPT') {
+          let verifiedUser: VerifiedTgUser | null = null;
+          if (body.initData) {
+            verifiedUser = verifyTelegramInitData(body.initData, process.env.BOT_TOKEN || '');
+          }
+          let senderTgId = verifiedUser?.id;
+          let senderId = verifiedUser ? `tg_${senderTgId}` : (body.senderId || body.playerId || '');
+          if (!senderTgId && senderId.startsWith('tg_')) {
+            const parsed = parseInt(senderId.slice(3), 10);
+            if (!isNaN(parsed)) senderTgId = parsed;
+          }
+
+          if (!room.rematchOfferedBy) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'NO_REMATCH_OFFER', message: 'No rematch offered.' }));
+            return;
+          }
+
+          // Swap players and their sides
+          const prevTop = room.topPlayer;
+          const prevBottom = room.bottomPlayer;
+          if (prevTop) prevTop.side = 'bottom';
+          if (prevBottom) prevBottom.side = 'top';
+          room.topPlayer = prevBottom;
+          room.bottomPlayer = prevTop;
+
+          if (room.presence) {
+            const prevTopPres = room.presence.top;
+            const prevBottomPres = room.presence.bottom;
+            room.presence = {
+              top: prevBottomPres || 'playing',
+              bottom: prevTopPres || 'playing'
+            };
+          }
+
+          // Reset game state for new match with sides swapped
+          room.gameState = {
+            turn: 0,
+            pos: [60, 3],
+            walls: [8, 8],
+            blocked: new Array(64).fill(0),
+            over: -1,
+            ply: 0
+          };
+          room.moves = [];
+          room.notation = [];
+          room.rating_applied = false;
+          delete room.eloResult;
+          delete room.endReason;
+          delete room.resignedBy;
+          room.canceled = false;
+          room.drawOfferedBy = null;
+          room.rematchOfferedBy = null;
+
+          if (room.topPlayer?.tgId) {
+            try {
+              const { getOrCreateUserElo } = await import('./db/index.js');
+              room.topPlayer.elo = await getOrCreateUserElo(room.topPlayer.tgId, room.topPlayer.name, room.topPlayer.username);
+            } catch {}
+          }
+          if (room.bottomPlayer?.tgId) {
+            try {
+              const { getOrCreateUserElo } = await import('./db/index.js');
+              room.bottomPlayer.elo = await getOrCreateUserElo(room.bottomPlayer.tgId, room.bottomPlayer.name, room.bottomPlayer.username);
+            } catch {}
+          }
+
+          room.version++;
+          updateAndBroadcastPresence(id);
+          console.log(`[SERVER] Rematch accepted in room ${id}. Sides swapped: Top=${room.topPlayer?.name}, Bottom=${room.bottomPlayer?.name}`);
+          broadcastToRoom(id, 'ROOM_SYNC', room);
+          broadcastToRoom(id, 'REMATCH_ACCEPTED', { version: room.version });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, room, version: room.version }));
+          return;
         } else if (body.type === 'RESET') {
           room.gameState = {
             turn: 0,
@@ -1112,9 +1577,14 @@ export function handleRoomHttp(req: IncomingMessage, res: ServerResponse): boole
             ply: 0
           };
           room.moves = [];
+          room.notation = [];
           room.rating_applied = false;
           delete room.eloResult;
+          delete room.endReason;
+          delete room.resignedBy;
+          room.canceled = false;
           room.drawOfferedBy = null;
+          room.rematchOfferedBy = null;
           room.version++;
           updateAndBroadcastPresence(id);
           console.log(`[SERVER] Reset received in room ${id}`);

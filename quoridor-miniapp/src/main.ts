@@ -239,14 +239,74 @@ const drawerStatWins = document.getElementById('drawer-stat-wins')!;
 const drawerStatStreak = document.getElementById('drawer-stat-streak')!;
 const btnDrawerSwitchSide = document.getElementById('btn-drawer-switch-side')!;
 
-// Victory Modal
-const gameOverModal = document.getElementById('gameover-modal')!;
-const modalTitle = document.getElementById('modal-title')!;
-const modalDesc = document.getElementById('modal-desc')!;
-const modalEloPill = document.getElementById('modal-elo-pill')!;
-const modalDeltaText = document.getElementById('modal-delta-text')!;
-const btnModalRematch = document.getElementById('btn-modal-rematch')!;
-const btnModalShare = document.getElementById('btn-modal-share')!;
+// Game Over Bar & Small ELO deltas
+const gameoverBar = document.getElementById('gameover-bar')!;
+const gameoverResultText = document.getElementById('gameover-result-text')!;
+const btnGameoverRematch = document.getElementById('btn-gameover-rematch')!;
+const p1EloDelta = document.getElementById('p1-elo-delta')!;
+const p2EloDelta = document.getElementById('p2-elo-delta')!;
+
+// Rematch Flow Dialog & State
+const rematchDialog = document.getElementById('rematch-dialog');
+const rematchDialogText = document.getElementById('rematch-dialog-text');
+const rematchBtnPrimary = document.getElementById('rematch-btn-primary') as HTMLButtonElement | null;
+const rematchBtnSecondary = document.getElementById('rematch-btn-secondary') as HTMLButtonElement | null;
+const gameToast = document.getElementById('game-toast');
+
+let isRematchProposer = false;
+type RematchDialogState = 'none' | 'confirm_propose' | 'waiting_approval' | 'opponent_offered';
+let currentRematchState: RematchDialogState = 'none';
+let toastTimer: any = null;
+
+function showToast(message: string, duration = 3000) {
+  if (!gameToast) return;
+  gameToast.textContent = message;
+  gameToast.classList.remove('hidden');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    gameToast?.classList.add('hidden');
+    toastTimer = null;
+  }, duration);
+}
+
+function showRematchDialog(state: RematchDialogState) {
+  if (isSpectator) return;
+  currentRematchState = state;
+  if (!rematchDialog || !rematchDialogText || !rematchBtnPrimary || !rematchBtnSecondary) return;
+
+  if (state === 'confirm_propose') {
+    rematchDialogText.textContent = 'Do you want to propose a rematch to your opponent?';
+    rematchBtnPrimary.textContent = 'Yes';
+    rematchBtnPrimary.classList.remove('hidden');
+    rematchBtnSecondary.textContent = 'No';
+    rematchBtnSecondary.classList.remove('hidden');
+    rematchDialog.classList.remove('hidden');
+    triggerHaptic('light');
+  } else if (state === 'waiting_approval') {
+    rematchDialogText.textContent = 'The rematch was proposed to your opponent. Waiting for his approval...';
+    rematchBtnPrimary.classList.add('hidden');
+    rematchBtnSecondary.textContent = 'Cancel';
+    rematchBtnSecondary.classList.remove('hidden');
+    rematchDialog.classList.remove('hidden');
+    triggerHaptic('light');
+  } else if (state === 'opponent_offered') {
+    rematchDialogText.textContent = 'Your opponent is proposing you a rematch.';
+    rematchBtnPrimary.textContent = 'Accept';
+    rematchBtnPrimary.classList.remove('hidden');
+    rematchBtnSecondary.textContent = 'Reject';
+    rematchBtnSecondary.classList.remove('hidden');
+    rematchDialog.classList.remove('hidden');
+    sounds.playMove();
+    triggerHaptic('medium');
+  } else {
+    rematchDialog.classList.add('hidden');
+  }
+}
+
+function hideRematchDialog() {
+  currentRematchState = 'none';
+  rematchDialog?.classList.add('hidden');
+}
 
 let opponentPhotoUrl: string | undefined = undefined;
 
@@ -276,6 +336,13 @@ const btnCancelWaiting = document.getElementById('btn-cancel-waiting')!;
 const btnDraw = document.getElementById('btn-draw')!;
 const btnCancelGame = document.getElementById('btn-cancel-game')!;
 
+const CANCEL_MAX_MOVES = 6;
+const boardConfirmDialog = document.getElementById('board-confirm-dialog');
+const boardConfirmText = document.getElementById('board-confirm-text');
+const boardConfirmYes = document.getElementById('board-confirm-yes');
+const boardConfirmNo = document.getElementById('board-confirm-no');
+let confirmAction: 'resign' | 'cancel' | null = null;
+
 // Spectator & Rating Elements
 const spectatorBanner = document.getElementById('spectator-banner');
 const spectatorBar = document.getElementById('spectator-bar');
@@ -303,41 +370,14 @@ let currentRoomPresence: RoomPresence = {
 };
 const opponentDisconnectedBanner = document.getElementById('opponent-disconnected-banner');
 
-function formatPresenceLabel(status: PlayerPresenceStatus, isTurn: boolean, isMyTurn: boolean): string {
-  let dotHtml = '';
-  let statusText = 'Waiting';
-  let textClass = 'presence-text-waiting';
-
-  switch (status) {
-    case 'waiting':
-      statusText = 'Waiting';
-      textClass = 'presence-text-waiting';
-      break;
-    case 'joined':
-      statusText = 'Joined';
-      textClass = 'presence-text-joined';
-      break;
-    case 'playing':
-      dotHtml = '<span class="presence-dot green"></span>';
-      statusText = 'Playing';
-      textClass = 'presence-text-playing';
-      break;
-    case 'disconnected':
-      dotHtml = '<span class="presence-dot red"></span>';
-      statusText = 'Disconnected';
-      textClass = 'presence-text-disconnected';
-      break;
-    default:
-      statusText = 'Waiting';
-      textClass = 'presence-text-waiting';
+function formatPresenceLabel(status: PlayerPresenceStatus): string {
+  if (status === 'disconnected') {
+    return '<span class="presence-text-disconnected"><span class="presence-dot red"></span>Disconnected</span>';
   }
-
-  let turnSuffix = '';
-  if (isTurn) {
-    turnSuffix = `<span class="presence-turn-suffix"> - ${isMyTurn ? 'Your turn' : 'Active turn'}</span>`;
+  if (status === 'playing' || status === 'joined') {
+    return '<span class="presence-text-playing"><span class="presence-dot green"></span>Playing</span>';
   }
-
-  return `<span class="${textClass}">${dotHtml}${statusText}</span>${turnSuffix}`;
+  return '<span class="presence-text-waiting">Waiting</span>';
 }
 
 function updateOpponentDisconnectBanner() {
@@ -388,7 +428,28 @@ function sendHeartbeat() {
 function startHeartbeat() {
   if (heartbeatInterval) clearInterval(heartbeatInterval);
   sendHeartbeat();
-  heartbeatInterval = setInterval(sendHeartbeat, 10000);
+  heartbeatInterval = setInterval(sendHeartbeat, 5000);
+}
+
+function sendBeaconDisconnect() {
+  if (!currentGameId || gameMode !== 'multiplayer') return;
+  const tgUser = initTelegramWebApp();
+  const tgId = (tgUser && tgUser.id && tgUser.id !== 12345678) ? tgUser.id : undefined;
+  const payload = JSON.stringify({
+    id: currentGameId,
+    playerId: myClientId,
+    tgId
+  });
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/room/disconnect', new Blob([payload], { type: 'application/json' }));
+  } else {
+    fetch('/api/room/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+      keepalive: true
+    }).catch(() => {});
+  }
 }
 
 function updateRatingLabelUI(isRated: boolean, isLocked = false) {
@@ -536,7 +597,7 @@ function init() {
   // Bottom action buttons
   btnModeMove.addEventListener('click', () => setInputMode('move'));
   btnModeWall.addEventListener('click', () => setInputMode('wall'));
-  btnResign.addEventListener('click', handleResign);
+  btnResign.addEventListener('click', () => showBoardConfirm('resign'));
 
   if (btnDraw) {
     btnDraw.addEventListener('click', () => {
@@ -553,7 +614,7 @@ function init() {
         }).catch(() => {});
       } else {
         gameState.over = 2;
-        onServerGameOver(2);
+        onServerGameOver(2, undefined, undefined, undefined, 'draw');
         updateUI();
       }
       triggerHaptic('light');
@@ -561,8 +622,23 @@ function init() {
   }
 
   if (btnCancelGame) {
-    btnCancelGame.addEventListener('click', handleResign);
+    btnCancelGame.addEventListener('click', () => showBoardConfirm('cancel'));
   }
+
+  boardConfirmYes?.addEventListener('click', () => {
+    const act = confirmAction;
+    hideBoardConfirm();
+    if (act === 'resign') {
+      executeResign();
+    } else if (act === 'cancel') {
+      executeCancel();
+    }
+  });
+
+  boardConfirmNo?.addEventListener('click', () => {
+    hideBoardConfirm();
+    triggerHaptic('light');
+  });
 
   btnSound?.addEventListener('click', () => {
     sounds.enabled = !sounds.enabled;
@@ -592,26 +668,86 @@ function init() {
 
   chatForm.addEventListener('submit', handleSendMessage);
 
-  // Victory Modals & Play Again direct link
-  btnModalRematch.addEventListener('click', async () => {
-    gameOverModal.classList.add('hidden');
-    hasProcessedGameOver = false;
+  // Game Over Rematch
+  btnGameoverRematch.addEventListener('click', () => {
+    if (isSpectator) return;
+    showRematchDialog('confirm_propose');
+  });
 
-    if (gameMode === 'multiplayer') {
+  rematchBtnPrimary?.addEventListener('click', async () => {
+    if (currentRematchState === 'confirm_propose') {
+      if (gameMode === 'bot') {
+        hideRematchDialog();
+        playerSide = playerSide === 'top' ? 'bottom' : 'top';
+        myPlayerIndex = playerSide === 'top' ? 0 : 1;
+        startNewGame();
+        return;
+      }
+      isRematchProposer = true;
+      showRematchDialog('waiting_approval');
       try {
         await fetch('/api/room/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: currentGameId, type: 'RESET' })
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'REMATCH_OFFER',
+            senderId: myClientId
+          })
         });
       } catch {}
-
-      startNewGame();
-    } else {
-      startNewGame();
+    } else if (currentRematchState === 'opponent_offered') {
+      hideRematchDialog();
+      try {
+        await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'REMATCH_ACCEPT',
+            senderId: myClientId
+          })
+        });
+      } catch {}
     }
   });
-  btnModalShare.addEventListener('click', shareMatchLink);
+
+  rematchBtnSecondary?.addEventListener('click', async () => {
+    if (currentRematchState === 'confirm_propose') {
+      hideRematchDialog();
+    } else if (currentRematchState === 'waiting_approval') {
+      hideRematchDialog();
+      const wasProposer = isRematchProposer;
+      isRematchProposer = false;
+      try {
+        await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'REMATCH_CANCEL',
+            senderId: myClientId
+          })
+        });
+      } catch {}
+      if (wasProposer) {
+        showToast('Rematch declined');
+      }
+    } else if (currentRematchState === 'opponent_offered') {
+      hideRematchDialog();
+      try {
+        await fetch('/api/room/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentGameId,
+            type: 'REMATCH_REJECT',
+            senderId: myClientId
+          })
+        });
+      } catch {}
+    }
+  });
 
   updateProfileUI();
 }
@@ -630,7 +766,7 @@ function normalizeGameState(st: any): GameState {
     pos: Array.isArray(st.pos) ? [Number(st.pos[0] ?? 60), Number(st.pos[1] ?? 3)] : [60, 3],
     walls: Array.isArray(st.walls) ? [Number(st.walls[0] ?? 8), Number(st.walls[1] ?? 8)] : [8, 8],
     turn: (st.turn === 1 ? 1 : 0) as Player,
-    over: (st.over === 0 || st.over === 1 || st.over === 2) ? st.over : -1,
+    over: (st.over === 0 || st.over === 1 || st.over === 2 || st.over === -2) ? (st.over as any) : -1,
     ply: Number(st.ply || 0)
   };
 }
@@ -719,8 +855,9 @@ function openSideSelectModal() {
   waitingModal.classList.add('hidden');
   updateSetupModalProfileUI();
   const ratingRow = document.querySelector('.setup-rating-row') as HTMLElement | null;
+  const isBotMatch = gameMode === 'bot' || (typeof currentGameId === 'string' && currentGameId.startsWith('bot_'));
   if (ratingRow) {
-    if (gameMode === 'bot') {
+    if (isBotMatch) {
       ratingRow.style.display = 'none';
       isRatedMatch = false;
     } else {
@@ -785,6 +922,10 @@ function selectSide(side: UserSide) {
           if (res.player?.id) {
             myClientId = res.player.id;
             sessionStorage.setItem('quoridor_client_id', myClientId);
+          }
+          if (typeof res.player?.elo === 'number') {
+            userProfile.elo = res.player.elo;
+            saveProfile(userProfile);
           }
           if (res.seat) {
             playerSide = res.seat;
@@ -854,10 +995,34 @@ function connectSSE() {
         const data = JSON.parse(e.data);
         if (data.winner !== undefined) {
           gameState.over = data.winner;
-          onServerGameOver(data.winner, data.eloResult);
+          onServerGameOver(data.winner, data.eloResult, undefined, undefined, data.endReason, data.resignedBy);
           updateUI();
         }
       } catch {}
+    });
+    es.addEventListener('REMATCH_OFFER', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (isSpectator) return;
+        if (data.offeredBy && data.offeredBy !== myClientId) {
+          showRematchDialog('opponent_offered');
+        }
+      } catch {}
+    });
+    es.addEventListener('REMATCH_DECLINED', () => {
+      hideRematchDialog();
+      if (isRematchProposer) {
+        showToast('Rematch declined');
+        isRematchProposer = false;
+      }
+    });
+    es.addEventListener('REMATCH_ACCEPTED', () => {
+      hideRematchDialog();
+      isRematchProposer = false;
+      hasProcessedGameOver = false;
+      gameoverBar?.classList.add('hidden');
+      p1EloDelta?.classList.add('hidden');
+      p2EloDelta?.classList.add('hidden');
     });
     es.onerror = () => {
       try { es.close(); } catch {}
@@ -891,17 +1056,18 @@ function reSyncRoomState() {
 }
 
 // Re-fetch and re-render full room state when mobile phone wakes or app regains focus
+// Send beacon on pagehide and visibilitychange->hidden
+window.addEventListener('pagehide', sendBeaconDisconnect);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
+  if (document.visibilityState === 'hidden') {
+    sendBeaconDisconnect();
+  } else if (document.visibilityState === 'visible') {
     sendHeartbeat();
     reSyncRoomState();
   }
 });
 window.addEventListener('focus', () => {
   sendHeartbeat();
-  reSyncRoomState();
-});
-window.addEventListener('focus', () => {
   reSyncRoomState();
 });
 
@@ -962,6 +1128,10 @@ function setupMultiplayerChannel() {
         if (res.player?.id) {
           myClientId = res.player.id;
           sessionStorage.setItem('quoridor_client_id', myClientId);
+        }
+        if (typeof res.player?.elo === 'number') {
+          userProfile.elo = res.player.elo;
+          saveProfile(userProfile);
         }
         isSpectator = false;
         playerSide = seat;
@@ -1057,6 +1227,10 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
         myClientId = room.topPlayer.id;
         sessionStorage.setItem('quoridor_client_id', myClientId);
       }
+      if (typeof room.topPlayer?.elo === 'number') {
+        userProfile.elo = room.topPlayer.elo;
+        saveProfile(userProfile);
+      }
       localStorage.setItem(`quoridor_side_${currentGameId}`, 'top');
       opponentName = room.bottomPlayer.name;
       opponentElo = room.bottomPlayer.elo;
@@ -1069,6 +1243,10 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
       if (room.bottomPlayer?.id) {
         myClientId = room.bottomPlayer.id;
         sessionStorage.setItem('quoridor_client_id', myClientId);
+      }
+      if (typeof room.bottomPlayer?.elo === 'number') {
+        userProfile.elo = room.bottomPlayer.elo;
+        saveProfile(userProfile);
       }
       localStorage.setItem(`quoridor_side_${currentGameId}`, 'bottom');
       opponentName = room.topPlayer.name;
@@ -1111,19 +1289,40 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
       actionToggles?.classList.remove('hidden');
       btnResign?.classList.remove('hidden');
       btnDraw?.classList.remove('hidden');
-      btnCancelGame?.classList.remove('hidden');
+      const totalMoves = (room.gameState?.ply ?? (room.moves?.length ?? 0));
+      if (totalMoves >= CANCEL_MAX_MOVES || (room.gameState && room.gameState.over !== -1)) {
+        btnCancelGame?.classList.add('hidden');
+      } else {
+        btnCancelGame?.classList.remove('hidden');
+      }
+      if (room.vs_bot) {
+        tabBtnChat?.classList.add('hidden');
+        chatPanel?.classList.add('hidden');
+      } else {
+        tabBtnChat?.classList.remove('hidden');
+      }
     }
 
     // Always ensure the board and UI are up-to-date with current game state
     if (room.gameState) {
       const prevTurn = gameState ? gameState.turn : null;
       gameState = normalizeGameState(room.gameState);
-      if (room.moves && room.moves.length > moveHistory.length) {
-        for (let i = moveHistory.length; i < room.moves.length; i++) {
-          const m = room.moves[i];
-          if (m) recordNotation(m.move || m, m.who);
+      if (Array.isArray(room.notation)) {
+        moveHistory.length = 0;
+        for (const row of room.notation) {
+          moveHistory.push({ ...row });
         }
-        sounds.playMove();
+        renderNotation();
+      } else if (room.moves && Array.isArray(room.moves)) {
+        let totalRecorded = 0;
+        moveHistory.forEach(r => { if (r.p1 && r.p1 !== '...') totalRecorded++; if (r.p2) totalRecorded++; });
+        if (room.moves.length > totalRecorded) {
+          for (let i = totalRecorded; i < room.moves.length; i++) {
+            const m = room.moves[i];
+            if (m) recordNotation(m.move || m, m.who);
+          }
+          sounds.playMove();
+        }
       }
       if (prevTurn !== myPlayerIndex && gameState.turn === myPlayerIndex && !isSpectator) {
         setInputMode('move');
@@ -1133,8 +1332,39 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
         renderBoard();
         void gridEl.offsetHeight;
       });
-      if (gameState.over >= 0) {
-        onServerGameOver(gameState.over as Player, room.eloResult, room.topPlayer, room.bottomPlayer);
+      if (gameState.over >= 0 || (gameState.over as any) === -2 || room.canceled) {
+        onServerGameOver(gameState.over as any, room.eloResult, room.topPlayer, room.bottomPlayer, room.endReason, room.resignedBy);
+      } else {
+        hasProcessedGameOver = false;
+        hideRematchDialog();
+        isRematchProposer = false;
+        gameoverBar?.classList.add('hidden');
+        p1EloDelta?.classList.add('hidden');
+        p2EloDelta?.classList.add('hidden');
+      }
+
+      // Rematch offer synchronization
+      if (!isSpectator) {
+        if (room.rematchOfferedBy) {
+          if (room.rematchOfferedBy === myClientId) {
+            if (currentRematchState !== 'waiting_approval') {
+              isRematchProposer = true;
+              showRematchDialog('waiting_approval');
+            }
+          } else {
+            if (currentRematchState !== 'opponent_offered') {
+              showRematchDialog('opponent_offered');
+            }
+          }
+        } else {
+          if (currentRematchState === 'waiting_approval' || currentRematchState === 'opponent_offered') {
+            hideRematchDialog();
+            if (isRematchProposer) {
+              showToast('Rematch declined');
+              isRematchProposer = false;
+            }
+          }
+        }
       }
       console.log(`[CLIENT] Board re-rendered for turn: ${gameState.turn}`);
     } else {
@@ -1152,6 +1382,10 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
       if (room.topPlayer?.id) {
         myClientId = room.topPlayer.id;
         sessionStorage.setItem('quoridor_client_id', myClientId);
+      }
+      if (typeof room.topPlayer?.elo === 'number') {
+        userProfile.elo = room.topPlayer.elo;
+        saveProfile(userProfile);
       }
       localStorage.setItem(`quoridor_side_${currentGameId}`, 'top');
       opponentName = 'Waiting for opponent…';
@@ -1177,6 +1411,10 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
       if (room.bottomPlayer?.id) {
         myClientId = room.bottomPlayer.id;
         sessionStorage.setItem('quoridor_client_id', myClientId);
+      }
+      if (typeof room.bottomPlayer?.elo === 'number') {
+        userProfile.elo = room.bottomPlayer.elo;
+        saveProfile(userProfile);
       }
       localStorage.setItem(`quoridor_side_${currentGameId}`, 'bottom');
       opponentName = 'Waiting for opponent…';
@@ -1211,7 +1449,11 @@ function startNewGame() {
   gameState = createInitialState(0);
   isBotThinking = false;
   moveHistory.length = 0;
-  gameOverModal.classList.add('hidden');
+  hideRematchDialog();
+  isRematchProposer = false;
+  gameoverBar?.classList.add('hidden');
+  p1EloDelta?.classList.add('hidden');
+  p2EloDelta?.classList.add('hidden');
   setInputMode('move');
   updateUI();
   renderNotation();
@@ -1249,8 +1491,8 @@ function updateUI() {
 
     const topPres = currentRoomPresence?.top || 'waiting';
     const bottomPres = currentRoomPresence?.bottom || 'waiting';
-    p2TurnTag.innerHTML = formatPresenceLabel(topPres, gameState.over === -1 && gameState.turn === 0, false);
-    p1TurnTag.innerHTML = formatPresenceLabel(bottomPres, gameState.over === -1 && gameState.turn === 1, false);
+    p2TurnTag.innerHTML = formatPresenceLabel(topPres);
+    p1TurnTag.innerHTML = formatPresenceLabel(bottomPres);
 
     p2WallsCount.textContent = String(gameState.walls[0]);
     p1WallsCount.textContent = String(gameState.walls[1]);
@@ -1300,8 +1542,8 @@ function updateUI() {
 
   const topPres = gameMode === 'bot' ? 'playing' : (currentRoomPresence?.top || 'waiting');
   const bottomPres = gameMode === 'bot' ? 'playing' : (currentRoomPresence?.bottom || 'waiting');
-  p2TurnTag.innerHTML = formatPresenceLabel(topPres, gameState.over === -1 && gameState.turn === 0, isTopPlayer);
-  p1TurnTag.innerHTML = formatPresenceLabel(bottomPres, gameState.over === -1 && gameState.turn === 1, !isTopPlayer);
+  p2TurnTag.innerHTML = formatPresenceLabel(topPres);
+  p1TurnTag.innerHTML = formatPresenceLabel(bottomPres);
 
   updateOpponentDisconnectBanner();
 
@@ -1332,6 +1574,37 @@ function updateUI() {
     btnModeWall.style.opacity = gameState.walls[myPlayerIndex] <= 0 ? '0.5' : '1';
     btnModeMove.style.pointerEvents = 'auto';
     btnModeWall.style.pointerEvents = gameState.walls[myPlayerIndex] <= 0 ? 'none' : 'auto';
+  }
+
+  const isGameOver = gameState.over >= 0 || (gameState.over as any) === -2;
+  if (isGameOver) {
+    actionToggles?.classList.add('hidden');
+    spectatorBar?.classList.add('hidden');
+    gameoverBar.classList.remove('hidden');
+    btnCancelGame?.classList.add('hidden');
+    btnResign?.classList.add('hidden');
+    btnDraw?.classList.add('hidden');
+    btnGameoverRematch.classList.toggle('hidden', isSpectator);
+  } else {
+    gameoverBar.classList.add('hidden');
+    if (isSpectator) {
+      spectatorBar?.classList.remove('hidden');
+      actionToggles?.classList.add('hidden');
+    } else {
+      spectatorBar?.classList.add('hidden');
+      actionToggles?.classList.remove('hidden');
+    }
+    const totalMoves = gameState?.ply ?? 0;
+    if (isSpectator || totalMoves >= CANCEL_MAX_MOVES) {
+      btnCancelGame?.classList.add('hidden');
+    } else {
+      btnCancelGame?.classList.remove('hidden');
+    }
+    if (isSpectator) {
+      btnResign?.classList.add('hidden');
+    } else {
+      btnResign?.classList.remove('hidden');
+    }
   }
 
   updateProfileUI();
@@ -1471,7 +1744,7 @@ async function onCellClick(cell: number) {
       setInputMode('move');
 
       if (gameState.over >= 0) {
-        onServerGameOver(gameState.over as Player);
+        onServerGameOver(gameState.over as Player, undefined, undefined, undefined, 'goal');
       }
       updateUI();
       triggerBotMoveIfNeeded();
@@ -1489,7 +1762,7 @@ async function onCellClick(cell: number) {
       setInputMode('move');
 
       if (gameState.over >= 0) {
-        onServerGameOver(gameState.over as Player);
+        onServerGameOver(gameState.over as Player, undefined, undefined, undefined, 'goal');
       }
       updateUI();
       triggerBotMoveIfNeeded();
@@ -1546,17 +1819,21 @@ async function triggerBotMoveIfNeeded() {
 
   isBotThinking = false;
   if (gameState.over >= 0) {
-    onServerGameOver(gameState.over as Player);
+    onServerGameOver(gameState.over as Player, undefined, undefined, undefined, 'goal');
   }
   updateUI();
 }
 
-function recordNotation(move: Move, who: Player) {
+function recordNotation(move: Move | any, who: Player) {
   let moveStr = '';
-  if (move.type === 'move') {
-    moveStr = `${cellToCoord(move.from!)}-${cellToCoord(move.to!)}`;
+  if (move && move.type === 'move' && typeof move.to === 'number') {
+    moveStr = cellToCoord(move.to);
+  } else if (move && move.type === 'wall' && typeof move.cell === 'number') {
+    moveStr = `W ${cellToCoord(move.cell)}`;
+  } else if (typeof move === 'string') {
+    moveStr = move;
   } else {
-    moveStr = `🧱 ${cellToCoord(move.cell!)}`;
+    return;
   }
 
   if (who === 0) {
@@ -1583,111 +1860,171 @@ function renderNotation() {
     notationList.innerHTML = `<div class="notation-empty">No moves recorded yet.</div>`;
     return;
   }
-  notationList.innerHTML = moveHistory.map(row => `
-    <div class="notation-row">
-      <span class="notation-num">${row.num}.</span>
-      <span>${row.p1}</span>
-      <span>${row.p2 || ''}</span>
-    </div>
-  `).join('');
+
+  const lastIdx = moveHistory.length - 1;
+  const lastRow = moveHistory[lastIdx];
+  const lastHasP2 = !!lastRow.p2;
+
+  notationList.innerHTML = moveHistory.map((row, idx) => {
+    const isLast = idx === lastIdx;
+    const isP1Latest = isLast && !lastHasP2;
+    const isP2Latest = isLast && lastHasP2;
+
+    const p1Html = `<span class="notation-move ${isP1Latest ? 'latest-move' : ''}">${row.p1}</span>`;
+    const p2Html = row.p2
+      ? `<span class="notation-move ${isP2Latest ? 'latest-move' : ''}">${row.p2}</span>`
+      : '';
+
+    return `
+      <div class="notation-row">
+        <span class="notation-num">${row.num}.</span>
+        ${p1Html}
+        ${p2Html}
+      </div>
+    `;
+  }).join('');
   notationList.scrollTop = notationList.scrollHeight;
+}
+
+function renderEloDelta(el: HTMLElement, delta: number) {
+  el.classList.remove('hidden', 'plus', 'minus', 'zero');
+  if (delta > 0) {
+    el.textContent = `+${delta}`;
+    el.classList.add('plus');
+  } else if (delta < 0) {
+    el.textContent = `${delta}`;
+    el.classList.add('minus');
+  } else {
+    el.textContent = `+0`;
+    el.classList.add('zero');
+  }
 }
 
 let hasProcessedGameOver = false;
 
-function onServerGameOver(winnerIndex: number, eloResult?: any, topPlayer?: any, bottomPlayer?: any) {
+function onServerGameOver(
+  winnerIndex: number,
+  eloResult?: any,
+  topPlayer?: any,
+  bottomPlayer?: any,
+  endReason?: 'goal' | 'resigned' | 'draw' | 'canceled',
+  _resignedBy?: string
+) {
   if (hasProcessedGameOver) return;
   hasProcessedGameOver = true;
 
   sounds.playWin();
   triggerHaptic('success');
 
+  const isCanceled = winnerIndex === -2 || endReason === 'canceled' || (eloResult && eloResult.message === 'No result (canceled)');
   const winnerIsTop = winnerIndex === 0;
-  const isWinner = winnerIndex === myPlayerIndex;
-  const isDraw = winnerIndex === 2;
+  const isWinner = !isCanceled && winnerIndex === myPlayerIndex;
+  const isDraw = winnerIndex === 2 || endReason === 'draw';
+  const reason = endReason || (isCanceled ? 'canceled' : (isDraw ? 'draw' : 'goal'));
+
+  let resultText = '';
 
   if (isSpectator) {
     const topName = spectatorTopPlayer?.name || topPlayer?.name || 'Top Player';
     const botName = spectatorBottomPlayer?.name || bottomPlayer?.name || 'Bottom Player';
-    if (isDraw) {
-      modalTitle.textContent = 'Draw';
-      modalDesc.textContent = 'Game ended in a mutual draw agreement.';
+    if (isCanceled) {
+      resultText = 'No result (canceled)';
+    } else if (isDraw) {
+      resultText = 'Draw';
     } else {
       const winnerName = winnerIsTop ? topName : botName;
-      modalTitle.textContent = 'Match Finished';
-      modalDesc.textContent = `${winnerName} reached the goal line and won!`;
+      if (reason === 'resigned') {
+        resultText = `${winnerName} won - opponent resigned`;
+      } else {
+        resultText = `${winnerName} won - reached the goal`;
+      }
     }
-    modalEloPill.textContent = 'Spectator';
-    modalEloPill.style.backgroundColor = '#64748b';
-    if (eloResult && eloResult.rated) {
-      modalDeltaText.textContent = `Top: ${eloResult.topDelta >= 0 ? '+' : ''}${eloResult.topDelta} | Bottom: ${eloResult.bottomDelta >= 0 ? '+' : ''}${eloResult.bottomDelta}`;
-      modalDeltaText.style.color = '#10b981';
+  } else {
+    if (isCanceled) {
+      resultText = 'No result (canceled)';
+    } else if (isDraw) {
+      resultText = 'Draw';
+    } else if (isWinner) {
+      userProfile.wins += 1;
+      userProfile.currentStreak += 1;
+      userProfile.bestStreak = Math.max(userProfile.bestStreak, userProfile.currentStreak);
+      if (reason === 'resigned') {
+        resultText = 'You won - opponent resigned';
+      } else {
+        resultText = 'You won - reached the goal';
+      }
     } else {
-      modalDeltaText.textContent = isRatedMatch ? 'Rated Game' : 'Unrated Game';
-      modalDeltaText.style.color = '#94a3b8';
+      userProfile.losses += 1;
+      userProfile.currentStreak = 0;
+      if (reason === 'resigned') {
+        resultText = 'You lost - resigned';
+      } else {
+        resultText = 'You lost - reached the goal';
+      }
     }
-
-    setTimeout(() => {
-      gameOverModal.classList.remove('hidden');
-    }, 350);
-    return;
+    if (!isCanceled) {
+      saveProfile(userProfile);
+    }
   }
 
   // Exact server Elo integration
-  let eloDelta = 0;
-  const isServerRated = eloResult && eloResult.rated === true;
+  const isServerRated = !isCanceled && eloResult && eloResult.rated === true;
 
   if (isServerRated) {
-    eloDelta = myPlayerIndex === 0 ? eloResult.topDelta : eloResult.bottomDelta;
-    const newElo = myPlayerIndex === 0 ? eloResult.topNewElo : eloResult.bottomNewElo;
-    userProfile.elo = newElo;
-    userProfile.peakElo = Math.max(userProfile.peakElo || 1000, newElo);
-  }
-
-  if (isDraw) {
-    modalTitle.textContent = 'Draw';
-    modalDesc.textContent = 'Game ended in a mutual draw agreement.';
-  } else if (isWinner) {
-    userProfile.wins += 1;
-    userProfile.currentStreak += 1;
-    userProfile.bestStreak = Math.max(userProfile.bestStreak, userProfile.currentStreak);
-    modalTitle.textContent = 'Victory';
-    modalDesc.textContent = `${userProfile.name} won the match!`;
-  } else {
-    userProfile.losses += 1;
-    userProfile.currentStreak = 0;
-    modalTitle.textContent = 'Defeat';
-    modalDesc.textContent = `${opponentName} won the match!`;
-  }
-  saveProfile(userProfile);
-
-  modalEloPill.textContent = String(userProfile.elo);
-  modalEloPill.style.backgroundColor = getEloBadgeColor(userProfile.elo);
-
-  if (isServerRated) {
-    if (eloDelta > 0) {
-      modalDeltaText.textContent = `+${eloDelta} ELO`;
-      modalDeltaText.style.color = '#10b981';
-    } else if (eloDelta < 0) {
-      modalDeltaText.textContent = `${eloDelta} ELO`;
-      modalDeltaText.style.color = '#f43f5e';
-    } else {
-      modalDeltaText.textContent = `0 ELO`;
-      modalDeltaText.style.color = '#94a3b8';
+    if (!isSpectator) {
+      const newElo = myPlayerIndex === 0 ? eloResult.topNewElo : eloResult.bottomNewElo;
+      userProfile.elo = newElo;
+      userProfile.peakElo = Math.max(userProfile.peakElo || 1000, newElo);
+      saveProfile(userProfile);
     }
+    renderEloDelta(p2EloDelta, eloResult.topDelta);
+    renderEloDelta(p1EloDelta, eloResult.bottomDelta);
   } else {
-    modalDeltaText.textContent = 'Unrated: no rating change';
-    modalDeltaText.style.color = '#94a3b8';
+    p1EloDelta.classList.add('hidden');
+    p2EloDelta.classList.add('hidden');
   }
 
-  setTimeout(() => {
-    gameOverModal.classList.remove('hidden');
-  }, 350);
+  // Bottom bar Game Over UI
+  gameoverResultText.textContent = resultText;
+  gameoverBar.classList.remove('hidden');
+  actionToggles?.classList.add('hidden');
+  spectatorBar?.classList.add('hidden');
+  btnCancelGame?.classList.add('hidden');
+  btnResign?.classList.add('hidden');
+  btnDraw?.classList.add('hidden');
+  btnGameoverRematch.classList.toggle('hidden', isSpectator);
+
+  updateUI();
+  updateProfileUI();
 }
 
-function handleResign() {
+function showBoardConfirm(type: 'resign' | 'cancel') {
   if (isSpectator) return;
-  if (gameState.over >= 0) return;
+  if (gameState.over >= 0 || (gameState.over as any) === -2) return;
+  if (type === 'cancel' && (gameState.ply ?? 0) >= CANCEL_MAX_MOVES) return;
+
+  confirmAction = type;
+  if (!boardConfirmDialog || !boardConfirmText || !boardConfirmYes) return;
+
+  if (type === 'resign') {
+    boardConfirmText.textContent = 'Do you really want to resign?';
+    boardConfirmYes.classList.remove('btn-cancel-type');
+  } else {
+    boardConfirmText.textContent = 'Do you want to cancel current game?';
+    boardConfirmYes.classList.add('btn-cancel-type');
+  }
+  boardConfirmDialog.classList.remove('hidden');
+  triggerHaptic('light');
+}
+
+function hideBoardConfirm() {
+  confirmAction = null;
+  boardConfirmDialog?.classList.add('hidden');
+}
+
+function executeResign() {
+  if (isSpectator) return;
+  if (gameState.over >= 0 || (gameState.over as any) === -2) return;
 
   if (gameMode === 'multiplayer') {
     fetch('/api/room/action', {
@@ -1702,7 +2039,29 @@ function handleResign() {
   } else {
     const winner = (1 - myPlayerIndex) as Player;
     gameState.over = winner;
-    onServerGameOver(winner);
+    onServerGameOver(winner, undefined, undefined, undefined, 'resigned');
+    updateUI();
+  }
+}
+
+function executeCancel() {
+  if (isSpectator) return;
+  if (gameState.over >= 0 || (gameState.over as any) === -2) return;
+  if ((gameState.ply ?? 0) >= CANCEL_MAX_MOVES) return;
+
+  if (gameMode === 'multiplayer') {
+    fetch('/api/room/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: currentGameId,
+        type: 'CANCEL',
+        senderId: myClientId
+      })
+    }).catch(() => {});
+  } else {
+    gameState.over = -2 as any;
+    onServerGameOver(-2, undefined, undefined, undefined, 'canceled');
     updateUI();
   }
 }

@@ -80,6 +80,8 @@ export interface ServerEloResult {
   eB: number;
 }
 
+export const ELO_K_FACTOR = 80;
+
 export function calculateServerElo(
   ratingA: number,
   ratingB: number,
@@ -93,9 +95,20 @@ export function calculateServerElo(
   const eA = 1 / (1 + Math.pow(10, (rB - rA) / 400));
   const eB = 1 / (1 + Math.pow(10, (rA - rB) / 400));
 
-  const K = 80;
-  const deltaA = Math.round(K * (scoreA - eA));
-  const deltaB = Math.round(K * (scoreB - eB));
+  // DRAW = NO RATING CHANGE for both players (delta = 0 / 0)
+  if (scoreA === 0.5) {
+    return {
+      deltaA: 0,
+      deltaB: 0,
+      newRA: Math.max(100, Math.round(rA)),
+      newRB: Math.max(100, Math.round(rB)),
+      eA,
+      eB
+    };
+  }
+
+  const deltaA = Math.round(ELO_K_FACTOR * (scoreA - eA));
+  const deltaB = Math.round(ELO_K_FACTOR * (scoreB - eB));
 
   // Minimum rating is 100
   const newRA = Math.max(100, rA + deltaA);
