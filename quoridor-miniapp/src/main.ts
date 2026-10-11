@@ -1443,11 +1443,13 @@ function handleRoomSyncData(room: any, forceResync: boolean = false) {
       const prevTurn = gameState ? gameState.turn : null;
       gameState = normalizeGameState(room.gameState);
       if (Array.isArray(room.notation)) {
-        moveHistory.length = 0;
-        for (const row of room.notation) {
-          moveHistory.push({ ...row });
+        if (!isSameNotation(moveHistory, room.notation)) {
+          moveHistory.length = 0;
+          for (const row of room.notation) {
+            moveHistory.push({ ...row });
+          }
+          renderNotation();
         }
-        renderNotation();
       } else if (room.moves && Array.isArray(room.moves)) {
         let totalRecorded = 0;
         moveHistory.forEach(r => { if (r.p1 && r.p1 !== '...') totalRecorded++; if (r.p2) totalRecorded++; });
@@ -1619,7 +1621,7 @@ function startNewGame() {
   p2EloDelta?.classList.add('hidden');
   setInputMode('move');
   updateUI();
-  renderNotation();
+  renderNotation(true);
   triggerHaptic('medium');
 
   // If player chose Bottom, AI (Top / Player 0) makes the first move!
@@ -2023,35 +2025,116 @@ function recordNotation(move: Move | any, who: Player) {
   renderNotation();
 }
 
-function renderNotation() {
+function isSameNotation(a: MoveRecord[], b: MoveRecord[]): boolean {
+  if (a.length !== b.length) return false;
+  if (a.length === 0) return true;
+  const lastA = a[a.length - 1];
+  const lastB = b[b.length - 1];
+  return lastA.num === lastB.num && lastA.p1 === lastB.p1 && lastA.p2 === lastB.p2;
+}
+
+function renderNotation(forceRebuild = false) {
   if (moveHistory.length === 0) {
     notationList.innerHTML = `<div class="notation-empty">No moves recorded yet.</div>`;
     return;
   }
 
+  const emptyEl = notationList.querySelector('.notation-empty');
+  if (emptyEl) {
+    emptyEl.remove();
+  }
+
+  // Preserve user scroll: auto-scroll only if user was already at bottom (within ~40px)
+  const isAtBottom = (notationList.scrollHeight - notationList.scrollTop - notationList.clientHeight) <= 40;
+
+  const existingRows = notationList.querySelectorAll('.notation-row');
   const lastIdx = moveHistory.length - 1;
   const lastRow = moveHistory[lastIdx];
   const lastHasP2 = !!lastRow.p2;
 
-  notationList.innerHTML = moveHistory.map((row, idx) => {
-    const isLast = idx === lastIdx;
-    const isP1Latest = isLast && !lastHasP2;
-    const isP2Latest = isLast && lastHasP2;
+  // Full rebuild if requested, if DOM is empty, or if existing rows count is out of sync
+  if (forceRebuild || existingRows.length > moveHistory.length || existingRows.length === 0) {
+    notationList.innerHTML = moveHistory.map((row, idx) => {
+      const isLast = idx === lastIdx;
+      const isP1Latest = isLast && !lastHasP2;
+      const isP2Latest = isLast && lastHasP2;
 
-    const p1Html = `<span class="notation-move ${isP1Latest ? 'latest-move' : ''}">${row.p1}</span>`;
-    const p2Html = row.p2
-      ? `<span class="notation-move ${isP2Latest ? 'latest-move' : ''}">${row.p2}</span>`
-      : '';
+      const p1Html = `<span class="notation-move ${isP1Latest ? 'latest-move' : ''}">${row.p1}</span>`;
+      const p2Html = row.p2
+        ? `<span class="notation-move ${isP2Latest ? 'latest-move' : ''}">${row.p2}</span>`
+        : '';
 
-    return `
-      <div class="notation-row">
-        <span class="notation-num">${row.num}.</span>
-        ${p1Html}
-        ${p2Html}
-      </div>
-    `;
-  }).join('');
-  notationList.scrollTop = notationList.scrollHeight;
+      return `
+        <div class="notation-row">
+          <span class="notation-num">${row.num}.</span>
+          ${p1Html}
+          ${p2Html}
+        </div>
+      `;
+    }).join('');
+
+    if (isAtBottom) {
+      notationList.scrollTop = notationList.scrollHeight;
+    }
+    return;
+  }
+
+  // Incremental Update:
+  // 1. Remove previous latest-move highlights
+  notationList.querySelectorAll('.latest-move').forEach(el => el.classList.remove('latest-move'));
+
+  // 2. Update last existing row if P2 move was added to it
+  const lastExistingRowIdx = existingRows.length - 1;
+  const currentRecordForLastExisting = moveHistory[lastExistingRowIdx];
+  const lastRowEl = existingRows[lastExistingRowIdx];
+  const moveSpans = lastRowEl.querySelectorAll('.notation-move');
+
+  if (currentRecordForLastExisting.p2 && moveSpans.length === 1) {
+    const p2Span = document.createElement('span');
+    const isLatest = (lastExistingRowIdx === lastIdx);
+    p2Span.className = `notation-move ${isLatest ? 'latest-move' : ''}`.trim();
+    p2Span.textContent = currentRecordForLastExisting.p2;
+    lastRowEl.appendChild(p2Span);
+  } else if (moveSpans.length >= 1 && lastExistingRowIdx === lastIdx && !currentRecordForLastExisting.p2) {
+    moveSpans[0].classList.add('latest-move');
+  } else if (moveSpans.length >= 2 && lastExistingRowIdx === lastIdx && currentRecordForLastExisting.p2) {
+    moveSpans[1].classList.add('latest-move');
+  }
+
+  // 3. Append only new rows
+  for (let idx = existingRows.length; idx <= lastIdx; idx++) {
+    const row = moveHistory[idx];
+    const isLast = (idx === lastIdx);
+    const isP1Latest = isLast && !row.p2;
+    const isP2Latest = isLast && !!row.p2;
+
+    const rowEl = document.createElement('div');
+    rowEl.className = 'notation-row';
+
+    const numSpan = document.createElement('span');
+    numSpan.className = 'notation-num';
+    numSpan.textContent = `${row.num}.`;
+    rowEl.appendChild(numSpan);
+
+    const p1Span = document.createElement('span');
+    p1Span.className = `notation-move ${isP1Latest ? 'latest-move' : ''}`.trim();
+    p1Span.textContent = row.p1;
+    rowEl.appendChild(p1Span);
+
+    if (row.p2) {
+      const p2Span = document.createElement('span');
+      p2Span.className = `notation-move ${isP2Latest ? 'latest-move' : ''}`.trim();
+      p2Span.textContent = row.p2;
+      rowEl.appendChild(p2Span);
+    }
+
+    notationList.appendChild(rowEl);
+  }
+
+  // 4. Auto-scroll only if user was already at bottom before this update
+  if (isAtBottom) {
+    notationList.scrollTop = notationList.scrollHeight;
+  }
 }
 
 function renderEloDelta(el: HTMLElement, delta: number) {
@@ -2255,16 +2338,24 @@ function closeDrawer() {
 }
 
 function toggleNotationPanel() {
+  const isOpening = notationPanel.classList.contains('hidden');
   notationPanel.classList.toggle('hidden');
   chatPanel.classList.add('hidden');
   triggerHaptic('light');
+  if (isOpening) {
+    notationList.scrollTop = notationList.scrollHeight;
+  }
 }
 
 function toggleChatPanel() {
+  const isOpening = chatPanel.classList.contains('hidden');
   chatPanel.classList.toggle('hidden');
   notationPanel.classList.add('hidden');
   chatUnreadDot.classList.add('hidden');
   triggerHaptic('light');
+  if (isOpening) {
+    chatMessagesList.scrollTop = chatMessagesList.scrollHeight;
+  }
 }
 
 // Live Chat System
@@ -2315,8 +2406,11 @@ function renderChatMessage(rawMsg: any) {
     ${!isSelf ? `<div class="chat-msg-sender">${escapeHtml(senderName)}</div>` : ''}
     <div>${escapeHtml(text)}</div>
   `;
+  const isAtBottom = (chatMessagesList.scrollHeight - chatMessagesList.scrollTop - chatMessagesList.clientHeight) <= 40;
   chatMessagesList.appendChild(msgEl);
-  chatMessagesList.scrollTop = chatMessagesList.scrollHeight;
+  if (isAtBottom || isSelf) {
+    chatMessagesList.scrollTop = chatMessagesList.scrollHeight;
+  }
 
   if (chatPanel.classList.contains('hidden') && !isSelf) {
     chatUnreadDot.classList.remove('hidden');
